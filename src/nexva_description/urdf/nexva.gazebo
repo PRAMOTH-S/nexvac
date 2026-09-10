@@ -1,0 +1,212 @@
+<?xml version="1.0"?>
+
+<robot>
+
+  <!-- ================================================= -->
+  <!-- DIFFERENTIAL DRIVE -->
+  <!-- ================================================= -->
+
+  <gazebo>
+
+    <plugin
+      filename="gz-sim-diff-drive-system"
+      name="gz::sim::systems::DiffDrive">
+
+      <topic>/cmd_vel</topic>
+
+      <left_joint>right_wheel_joint</left_joint>
+      <right_joint>left_wheel_joint</right_joint>
+
+      <!-- Must match the URDF. Wheels sit at y = +-0.1225, so they are
+           0.245 apart, and are 67 mm across, so the radius is 0.0335.
+           Getting these wrong makes the odometry lie about how far the
+           robot has driven and how far it has turned. -->
+      <wheel_separation>0.245</wheel_separation>
+      <wheel_radius>0.0335</wheel_radius>
+
+      <max_velocity>3.0</max_velocity>
+
+      <max_linear_acceleration>1.0</max_linear_acceleration>
+      <min_linear_acceleration>-1.0</min_linear_acceleration>
+
+      <max_angular_acceleration>2.0</max_angular_acceleration>
+      <min_angular_acceleration>-2.0</min_angular_acceleration>
+
+      <max_linear_velocity>0.5</max_linear_velocity>
+      <min_linear_velocity>-0.5</min_linear_velocity>
+
+      <max_angular_velocity>2.0</max_angular_velocity>
+      <min_angular_velocity>-2.0</min_angular_velocity>
+
+      <odom_topic>/odom</odom_topic>
+
+      <!-- The diff drive plugin owns odom -> base_footprint, bridged to ROS
+           by the tf entry in gz_bridge.yaml. Exactly one publisher.
+           Two alternatives were built and measured, and neither is used:
+             - a robot_localization EKF fusing these wheels with the BNO055:
+               109 deg mean heading error against ground truth, versus 12 deg
+               for these wheels alone. It rotated the map and doubled walls.
+             - odom_guard publishing the pose from slip-guarded speed and IMU
+               heading: fixes map leaking past a wall during a crash, but its
+               heading lags (51 deg published against a real 86) and SLAM
+               then builds no map.
+           Anything that publishes this transform must remove the other
+           publisher at the same time. -->
+      <tf_topic>/tf</tf_topic>
+
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+
+      <odom_publish_frequency>30</odom_publish_frequency>
+
+    </plugin>
+
+
+    <!-- ================================================= -->
+    <!-- JOINT STATE PUBLISHER -->
+    <!-- ================================================= -->
+
+    <plugin
+      filename="gz-sim-joint-state-publisher-system"
+      name="gz::sim::systems::JointStatePublisher">
+
+      <topic>/joint_states</topic>
+
+      <joint_name>left_wheel_joint</joint_name>
+      <joint_name>right_wheel_joint</joint_name>
+
+    </plugin>
+
+  </gazebo>
+
+
+  <!-- ================================================= -->
+  <!-- IMU (BNO055) -->
+  <!-- ================================================= -->
+
+  <gazebo reference="imu_link">
+
+    <sensor name="imu_sensor" type="imu">
+
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+
+      <!-- The BNO055 reports orientation, rates and acceleration at 100 Hz -->
+      <update_rate>100</update_rate>
+
+      <topic>imu</topic>
+
+      <gz_frame_id>imu_link</gz_frame_id>
+
+      <imu>
+
+        <angular_velocity>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.002</stddev>
+              <bias_mean>0.0000075</bias_mean>
+              <bias_stddev>0.0000008</bias_stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.002</stddev>
+              <bias_mean>0.0000075</bias_mean>
+              <bias_stddev>0.0000008</bias_stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.002</stddev>
+              <bias_mean>0.0000075</bias_mean>
+              <bias_stddev>0.0000008</bias_stddev>
+            </noise>
+          </z>
+        </angular_velocity>
+
+        <linear_acceleration>
+          <x>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.017</stddev>
+              <bias_mean>0.1</bias_mean>
+              <bias_stddev>0.001</bias_stddev>
+            </noise>
+          </x>
+          <y>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.017</stddev>
+              <bias_mean>0.1</bias_mean>
+              <bias_stddev>0.001</bias_stddev>
+            </noise>
+          </y>
+          <z>
+            <noise type="gaussian">
+              <mean>0.0</mean>
+              <stddev>0.017</stddev>
+              <bias_mean>0.1</bias_mean>
+              <bias_stddev>0.001</bias_stddev>
+            </noise>
+          </z>
+        </linear_acceleration>
+
+      </imu>
+
+    </sensor>
+
+  </gazebo>
+
+
+  <!-- ================================================= -->
+  <!-- LIDAR -->
+  <!-- IMPORTANT: OUTSIDE THE PLUGIN -->
+  <!-- ================================================= -->
+
+  <gazebo reference="laser">
+
+  <sensor
+    name="lidar_sensor"
+    type="gpu_lidar">
+
+    <pose>0 0 0 0 0 0</pose>
+
+    <always_on>true</always_on>
+    <visualize>true</visualize>
+    <update_rate>10</update_rate>
+
+    <topic>/scan</topic>
+
+    <gz_frame_id>laser</gz_frame_id>
+
+    <lidar>
+
+      <!-- Matched to the real sensor on this robot, an RPLIDAR C1:
+           10 Hz, about 450 samples per revolution, 0.05 to 12 m.
+           Keeping the simulated lidar honest is what makes a result in
+           simulation mean anything about the hardware. -->
+      <scan>
+        <horizontal>
+          <samples>450</samples>
+          <resolution>1</resolution>
+          <min_angle>-3.14159265</min_angle>
+          <max_angle>3.14159265</max_angle>
+        </horizontal>
+      </scan>
+
+      <range>
+        <min>0.05</min>
+        <max>12.0</max>
+        <resolution>0.01</resolution>
+      </range>
+
+    </lidar>
+
+  </sensor>
+
+</gazebo>
+
+</robot>

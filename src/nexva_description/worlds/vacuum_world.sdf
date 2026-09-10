@@ -1,0 +1,513 @@
+<?xml version="1.0"?>
+
+<sdf version="1.9">
+
+  <world name="vacuum_world">
+
+    <!-- ================= PHYSICS ================= -->
+
+    <physics name="default_physics" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <gravity>0 0 -9.81</gravity>
+
+
+    <!-- ================= SYSTEM PLUGINS ================= -->
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics"/>
+
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands"/>
+
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster"/>
+
+    <!-- ================= SENSORS ================= -->
+
+      <plugin
+        filename="gz-sim-sensors-system"
+        name="gz::sim::systems::Sensors">
+        <render_engine>ogre2</render_engine>
+      </plugin>
+
+      <!-- The Sensors system above only drives rendering sensors, which is
+           why the lidar works without this. The IMU is not a rendering
+           sensor and needs its own system, or imu_link's sensor is simply
+           never stepped and the topic stays silent. -->
+      <plugin
+        filename="gz-sim-imu-system"
+        name="gz::sim::systems::Imu">
+      </plugin>
+
+
+    <!-- ================= LIGHT ================= -->
+
+    <light
+      type="directional"
+      name="sun">
+
+      <pose>0 0 10 0 0 0</pose>
+
+      <cast_shadows>true</cast_shadows>
+
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+
+      <specular>0.2 0.2 0.2 1</specular>
+
+      <direction>-0.5 0.5 -1</direction>
+
+    </light>
+
+
+    <!-- ================================================= -->
+    <!-- FLOOR -->
+    <!-- ================================================= -->
+
+    <model name="floor">
+
+      <static>true</static>
+
+      <link name="floor_link">
+
+        <collision name="floor_collision">
+
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+
+        </collision>
+
+        <visual name="floor_visual">
+
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>20 20</size>
+            </plane>
+          </geometry>
+
+          <material>
+            <ambient>0.7 0.7 0.7 1</ambient>
+            <diffuse>0.7 0.7 0.7 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- WALL 1 - LEFT -->
+    <!-- ================================================= -->
+
+    <model name="wall_left">
+
+      <static>true</static>
+
+      <pose>0 5 1 0 0 0</pose>
+
+      <link name="wall_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>10 0.2 2</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>10 0.2 2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- WALL 2 - RIGHT -->
+    <!-- ================================================= -->
+
+    <model name="wall_right">
+
+      <static>true</static>
+
+      <pose>0 -5 1 0 0 0</pose>
+
+      <link name="wall_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>10 0.2 2</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>10 0.2 2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- WALL 3 - FRONT -->
+    <!-- ================================================= -->
+
+    <model name="wall_front">
+
+      <static>true</static>
+
+      <pose>5 0 1 0 0 0</pose>
+
+      <link name="wall_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>0.2 10 2</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>0.2 10 2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- WALL 4 - BACK -->
+    <!-- ================================================= -->
+
+    <model name="wall_back">
+
+      <static>true</static>
+
+      <pose>-5 0 1 0 0 0</pose>
+
+      <link name="wall_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>0.2 10 2</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>0.2 10 2</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- OBSTACLE 1 - RED BOX -->
+    <!-- ================================================= -->
+
+    <model name="obstacle_1">
+
+      <static>true</static>
+
+      <pose>1.5 1.5 0.5 0 0 0</pose>
+
+      <link name="obstacle_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.8 0.0 0.0 1</ambient>
+            <diffuse>0.8 0.0 0.0 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- OBSTACLE 2 - BLUE BOX -->
+    <!-- ================================================= -->
+
+    <model name="obstacle_2">
+
+      <static>true</static>
+
+      <pose>-1.5 1.5 0.5 0 0 0</pose>
+
+      <link name="obstacle_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>1 1 1</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.0 0.2 0.8 1</ambient>
+            <diffuse>0.0 0.2 0.8 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- OBSTACLE 3 - GREEN CYLINDER -->
+    <!-- ================================================= -->
+
+    <model name="obstacle_3">
+
+      <static>true</static>
+
+      <pose>0 -1.5 0.4 0 0 0</pose>
+
+      <link name="obstacle_link">
+
+        <collision name="collision">
+
+          <geometry>
+
+            <cylinder>
+              <radius>0.5</radius>
+              <length>0.8</length>
+            </cylinder>
+
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+
+            <cylinder>
+              <radius>0.5</radius>
+              <length>0.8</length>
+            </cylinder>
+
+          </geometry>
+
+          <material>
+            <ambient>0.0 0.7 0.1 1</ambient>
+            <diffuse>0.0 0.7 0.1 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- OBSTACLE 4 - YELLOW BOX -->
+    <!-- ================================================= -->
+
+    <model name="obstacle_4">
+
+      <static>true</static>
+
+      <pose>2.5 -2.0 0.4 0 0 0</pose>
+
+      <link name="obstacle_link">
+
+        <collision name="collision">
+
+          <geometry>
+            <box>
+              <size>0.8 1.2 0.8</size>
+            </box>
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+            <box>
+              <size>0.8 1.2 0.8</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.9 0.8 0.0 1</ambient>
+            <diffuse>0.9 0.8 0.0 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+    <!-- ================================================= -->
+    <!-- OBSTACLE 5 - ORANGE CYLINDER -->
+    <!-- ================================================= -->
+
+    <model name="obstacle_5">
+
+      <static>true</static>
+
+      <pose>-2.5 -2.0 0.5 0 0 0</pose>
+
+      <link name="obstacle_link">
+
+        <collision name="collision">
+
+          <geometry>
+
+            <cylinder>
+              <radius>0.4</radius>
+              <length>1.0</length>
+            </cylinder>
+
+          </geometry>
+
+        </collision>
+
+        <visual name="visual">
+
+          <geometry>
+
+            <cylinder>
+              <radius>0.4</radius>
+              <length>1.0</length>
+            </cylinder>
+
+          </geometry>
+
+          <material>
+            <ambient>1.0 0.3 0.0 1</ambient>
+            <diffuse>1.0 0.3 0.0 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+
+        </visual>
+
+      </link>
+
+    </model>
+
+
+  </world>
+
+</sdf>

@@ -1,0 +1,11 @@
+Arduino lib install 
+arduino-cli lib search micro_ros_arduino
+arduino-cli lib install micro_ros_arduino
+
+upload code 
+upload
+
+monitor
+
+sudo nano ~/.bashrc
+source ~/.bashrc

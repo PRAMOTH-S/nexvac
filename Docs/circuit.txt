@@ -1,0 +1,405 @@
+# vac_main1 — the robot as boxes and wires
+
+Every device, every pin, every cable. Tables, checks and the procedures that
+go with these are in [wiring.md](wiring.md); this file is the pictures.
+
+Pin numbers are the ones in the firmware and on the Pi's 40-pin header.
+
+**Kept current with every wiring change**, alongside `cmdline.md`, `build.md`,
+`flow.md` and `wiring.md`.
+
+## Contents
+
+- [1. The whole robot](#1-the-whole-robot)
+- [2. Raspberry Pi 40-pin header](#2-raspberry-pi-40-pin-header)
+- [3. BNO055 IMU to the Pi](#3-bno055-imu-to-the-pi)
+- [4. ESP32 to motors and encoders](#4-esp32-to-motors-and-encoders)
+- [5. RPLIDAR C1 to the Pi](#5-rplidar-c1-to-the-pi)
+- [6. Power](#6-power)
+- [7. The command path](#7-the-command-path)
+- [8. The data coming back](#8-the-data-coming-back)
+
+## 1. The whole robot
+
+Three devices hang off the Pi: two on USB, one on the I2C header pins.
+
+```
+                          ┌────────────────────────┐
+                          │     POWER SOURCE       │
+                          │imutest.py     battery pack       │
+                          └───────────┬────────────┘
+                                      │
+                  ┌───────────────────┴───────────────────┐
+                  │                                       │
+                  ▼                                       ▼
+        ┌───────────────────────┐             ┌────────────────────────┐
+        │  5 V regulator        │             │  motor rail            │
+        │  buck converter       │             │  straight from battery │
+        └───────────┬───────────┘             └───────────┬────────────┘
+                    │ 5 V                                 │ V motor
+                    ▼                                     ▼
+    ┌───────────────────────────────┐         ┌────────────────────────┐
+    │      RASPBERRY PI 5           │         │      MOTOR DRIVER      │
+    │      Ubuntu 24.04 server      │         │      H-bridge          │
+    │      ROS 2 Jazzy              │         └───────────┬────────────┘
+    │      ns vac_main1 / domain 1  │                     │
+    └───┬──────────┬──────────┬─────┘          ┌──────────┴──────────┐
+        │          │          │                ▼                     ▼
+        │ USB      │ USB      │ I2C bus 1  ┌─────────┐         ┌─────────┐
+        │ 460800   │ 115200   │ pins 3 & 5 │  LEFT   │         │  RIGHT  │
+        │          │          │            │  MOTOR  │         │  MOTOR  │
+        ▼          ▼          ▼            └────┬────┘         └────┬────┘
+  ┌──────────┐ ┌──────────┐ ┌──────────┐        │                   │
+  │ RPLIDAR  │ │  ESP32   │ │  BNO055  │        │ encoder A/B       │
+  │ C1       │ │          │ │  IMU     │        │                   │
+  │          │ │          │ │  0x28    │        │                   │
+  └──────────┘ └────┬─────┘ └──────────┘        │                   │
+                    │                           │                   │
+                    │  6 x GPIO out ───────────▶│ to MOTOR DRIVER   │
+                    │  4 x GPIO in  ◀───────────┴───────────────────┘
+                    │
+                    └── see diagram 4 for every pin
+```
+
+The ESP32 hosts **no network**. It is a USB device on the Pi, and the laptop
+talks to the Pi over DDS. In AP mode the ESP32 lands on 192.168.4.1 and puts
+whatever talks to it on the ESP32's own network — which means a laptop could
+then never reach the Pi. That is why the link is USB.
+
+## 2. Raspberry Pi 40-pin header
+
+Only four pins are used. Everything else on the robot is USB.
+
+```
+                    Raspberry Pi 5 — 40-pin header
+                    (pin 1 is the corner nearest the SD card)
+
+                        ┌─────┬─────┐
+              3V3   ────│  1  │  2  │──── 5V
+                        ├─────┼─────┤
+     GPIO 2  / SDA1 ────│  3  │  4  │──── 5V
+                        ├─────┼─────┤
+     GPIO 3  / SCL1 ────│  5  │  6  │──── GND
+                        ├─────┼─────┤
+     GPIO 4         ────│  7  │  8  │──── GPIO 14 / TXD
+                        ├─────┼─────┤
+              GND   ────│  9  │ 10  │──── GPIO 15 / RXD
+                        ├─────┼─────┤
+                        │ ... │ ... │      (nothing else used)
+                        └─────┴─────┘
+
+              used by the BNO055        left alone
+              ──────────────────        ──────────
+              pin 1   3V3     VIN       every other pin
+              pin 3   SDA1    SDA
+              pin 5   SCL1    SCL
+              pin 6   GND     GND
+```
+
+## 3. BNO055 IMU to the Pi
+
+Four wires. The breakout has a STEMMA QT / Qwiic socket, but the through-holes
+carry the same four signals.
+
+```
+       ┌──────────────────────┐                ┌──────────────────────┐
+       │   BNO055 breakout    │                │   Raspberry Pi 5     │
+       │   Adafruit, 9-DOF    │                │   40-pin header      │
+       ├──────────────────────┤                ├──────────────────────┤
+       │                      │                │                      │
+       │   VIN  ●─────────────┼── red ─────────┼──● pin 1    3V3      │
+       │                      │                │                      │
+       │   GND  ●─────────────┼── black ───────┼──● pin 6    GND      │
+       │                      │                │                      │
+       │   SDA  ●─────────────┼── blue ────────┼──● pin 3    GPIO 2   │
+       │                      │                │                      │
+       │   SCL  ●─────────────┼── yellow ──────┼──● pin 5    GPIO 3   │
+       │                      │                │                      │
+       │   ADR  ○             │                │                      │
+       │        │             │                │                      │
+       └────────┼─────────────┘                └──────────────────────┘
+                │
+                └── left floating  =  address 0x28   IMU_ADDRESS=40  (default)
+                    tied to 3V3    =  address 0x29   IMU_ADDRESS=41
+```
+
+| BNO055 | Pi pin | signal | why this pin |
+|---|---|---|---|
+| VIN | **1** | 3V3 | the board regulates 3–5 V; 3V3 keeps the I2C lines at the Pi's level |
+| GND | **6** | GND | must share ground with the Pi or I2C never settles |
+| SDA | **3** | GPIO 2 | bus 1 data. Pull-ups are already on the breakout |
+| SCL | **5** | GPIO 3 | bus 1 clock |
+| ADR | — | — | leave floating for 0x28 |
+
+Wire colours above are the usual convention, not a requirement — what matters
+is which hole goes to which pin.
+
+## 4. ESP32 to motors and encoders
+
+Ten GPIO. These come from `hardware/esp32/vaccum_ros2/vaccum_ros2.ino`, so
+they are what the firmware actually drives.
+
+```
+   ┌────────────────────────┐                    ┌────────────────────────┐
+   │        ESP32           │                    │     MOTOR DRIVER       │
+   ├────────────────────────┤                    │     H-bridge           │
+   │  ── outputs ──         │                    ├────────────────────────┤
+   │                        │                    │                        │
+   │   GPIO 25  ●───────────┼────────────────────┼──●  left  IN1          │
+   │   GPIO 26  ●───────────┼────────────────────┼──●  left  IN2          │
+   │   GPIO 27  ●───────────┼──── PWM 1 kHz ─────┼──●  left  ENA          │
+   │                        │                    │                        │
+   │   GPIO 18  ●───────────┼────────────────────┼──●  right IN1          │
+   │   GPIO 19  ●───────────┼────────────────────┼──●  right IN2          │
+   │   GPIO 23  ●───────────┼──── PWM 1 kHz ─────┼──●  right ENB          │
+   │                        │                    │                        │
+   ├────────────────────────┤                    └───────────┬────────────┘
+   │  ── inputs ──          │                                │ V motor
+   │                        │                                ▼
+   │   GPIO 34  ●◀──────────┼── left  encoder A ───┐   ┌────────────┐
+   │   GPIO 36  ●◀──────────┼── left  encoder B ───┤   │   LEFT     │
+   │                        │                      │   │   MOTOR    │
+   │   GPIO 35  ●◀──────────┼── right encoder A ───┤   ├────────────┤
+   │   GPIO 39  ●◀──────────┼── right encoder B ───┤   │   RIGHT    │
+   │                        │                      │   │   MOTOR    │
+   ├────────────────────────┤                      │   └─────┬──────┘
+   │                        │                      │         │
+   │   USB      ●═══════════╪═══ 115200 baud ═══▶  │         │
+   │            │           │      to the Pi       └─────────┘
+   └────────────┼───────────┘                    encoders on the motor shafts
+                │
+                └── counts leave 50 times a second
+```
+
+| ESP32 GPIO | goes to | direction | note |
+|---|---|---|---|
+| 25 | H-bridge left IN1 | out | direction |
+| 26 | H-bridge left IN2 | out | direction |
+| 27 | H-bridge left ENA | out | **PWM**, 1 kHz / 8 bit |
+| 18 | H-bridge right IN1 | out | direction |
+| 19 | H-bridge right IN2 | out | direction |
+| 23 | H-bridge right ENB | out | **PWM**, 1 kHz / 8 bit |
+| 34 | left encoder A | in | **interrupt** on CHANGE |
+| 36 | left encoder B | in | sampled in the handler, for direction |
+| 35 | right encoder A | in | **interrupt** on CHANGE |
+| 39 | right encoder B | in | sampled in the handler, for direction |
+
+**GPIO 34–39 are input-only and have no internal pull-ups.** They can still
+raise interrupts, which is all they are used for. If the encoders read zero or
+erratically, add external pull-ups — check that before suspecting the
+firmware.
+
+Only the A channels interrupt; B is read inside the handler to get direction.
+Counts go out over USB 50 times a second.
+
+## 5. RPLIDAR C1 to the Pi
+
+One USB cable, no GPIO.
+
+```
+       ┌──────────────────────┐                ┌──────────────────────┐
+       │    RPLIDAR C1        │                │   Raspberry Pi 5     │
+       │    360° laser        │═══ USB ═══════▶│   USB port           │
+       │                      │   460800 baud  │                      │
+       └──────────────────────┘                └──────────────────────┘
+
+              baud        460800          a wrong baud gives NO error,
+              scan mode   Standard        just silence — which looks
+              beams       450             exactly like a dead lidar
+              range       0.05 – 12.0 m
+              frame       lidar_link
+```
+
+## 6. Power
+
+```
+                     ┌────────────────────────┐
+                     │     battery pack       │
+                     └───────────┬────────────┘
+                                 │
+             ┌───────────────────┴───────────────────┐
+             │                                       │
+             ▼                                       ▼
+   ┌───────────────────┐                   ┌────────────────────┐
+   │  5 V regulator    │                   │   MOTOR DRIVER     │
+   └─────────┬─────────┘                   │   motor voltage    │
+             │ 5 V                         └─────────┬──────────┘
+             ▼                                       │
+   ┌───────────────────┐                             ▼
+   │  RASPBERRY PI 5   │                     ┌───────────────┐
+   └────┬────┬────┬────┘                     │ LEFT / RIGHT  │
+        │    │    │                          │ MOTORS        │
+   USB 5V   USB   pin 1 (3V3)                └───────────────┘
+        │    │    │
+        │    │    └─────┐
+        │    │          │
+        ▼    ▼          ▼
+   ┌──────┐ ┌──────┐ ┌──────────┐
+   │ESP32 │ │LiDAR │ │  BNO055  │
+   └──┬───┘ └──────┘ └──────────┘
+      │
+      │ logic only, no motor current
+      ▼
+   MOTOR DRIVER
+
+   ═══════════════════════════════════════════════════════════
+     ONE COMMON GROUND: battery ── Pi ── H-bridge ── ESP32
+   ═══════════════════════════════════════════════════════════
+```
+
+**Share a ground, do not share a regulator.** Motor current spikes on a rail
+the Pi is also using will reset the Pi mid-run — and that looks exactly like a
+software crash, so it wastes a lot of time before anyone suspects the wiring.
+
+The BNO055 draws almost nothing and is fine on the header's 3V3.
+
+## 7. The command path
+
+A keypress on the laptop to a wheel turning.
+
+```
+   ┌──────────────────────┐
+   │       LAPTOP         │
+   │  ./laptop.sh         │
+   │  w a s d / arrows    │
+   └──────────┬───────────┘
+              │
+              │  /vac_main1/cmd_vel        DDS, domain 1, over Wi-Fi
+              ▼
+   ┌──────────────────────┐
+   │   RASPBERRY PI 5     │
+   │   vaccum/esp32_bridge│
+   │                      │
+   │   cmd_timeout 1.0 s ─┼──▶ no cmd_vel for 1 s = stop the robot
+   └──────────┬───────────┘
+              │
+              │  USB serial, 115200
+              ▼
+   ┌──────────────────────┐
+   │       ESP32          │
+   │                      │
+   │   watchdog 500 ms ───┼──▶ no packet for 500 ms = stop the robot
+   └──────────┬───────────┘
+              │
+              │  GPIO 25 26 27  /  18 19 23
+              ▼
+   ┌──────────────────────┐
+   │    MOTOR DRIVER      │
+   └──────────┬───────────┘
+              │
+       ┌──────┴──────┐
+       ▼             ▼
+   LEFT MOTOR   RIGHT MOTOR
+```
+
+**Two watchdogs, catching two different failures.** The ESP32's 500 ms timer
+catches the cable being pulled or the Pi dying. It does *not* catch the laptop
+going away, because the bridge is still talking to it — just repeating a stale
+command. That is what `cmd_timeout` on the bridge is for. Kill the console,
+close the laptop, walk out of Wi-Fi range: the robot stops within a second.
+
+## 8. The data coming back
+
+Same wires, other direction.
+
+```
+   LEFT MOTOR   RIGHT MOTOR          RPLIDAR C1            BNO055 IMU
+       │             │                    │                     │
+       │  encoder    │  encoder           │ USB                 │ I2C
+       └──────┬──────┘                    │ 460800              │ pins 3 & 5
+              │                           │                     │
+              │ GPIO 34 36 35 39          │                     │
+              ▼                           │                     │
+   ┌──────────────────────┐               │                     │
+   │       ESP32          │               │                     │
+   │  counts 50 Hz        │               │                     │
+   └──────────┬───────────┘               │                     │
+              │ USB serial 115200         │                     │
+              ▼                           ▼                            ┌──────────────────┐
+                         │   POWER SOURCE   │
+                         │   Battery / PSU  │
+                         └────────┬─────────┘
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │                           │
+                    ▼                           ▼
+          ┌─────────────────┐         ┌─────────────────┐
+          │ Raspberry Pi    │         │ Motor / Power   │
+          │                 │         │ Supply          │
+          │                 │         └────────┬────────┘
+          └───────┬─────────┘                  │
+                  │                            ▼
+          ┌───────┴────────┐           ┌─────────────────┐
+          │                │           │ Motor Driver    │
+          ▼                ▼           └────────┬────────┘
+   ┌──────────────┐  ┌──────────────┐           │
+   │ LiDAR        │  │ ESP32        │           ▼
+   │ SLLIDAR      │  │ Controller   │    ┌─────────────────┐
+   └──────┬───────┘  └──────┬───────┘    │ Drive Motors    │
+          │ USB              │ USB       │ L / R           │
+          │                  │           └─────────────────┘
+          └──────────┬───────┘
+                     │
+                     ▼
+              ┌──────────────┐
+              │ Raspberry Pi │
+              │ ROS 2        │
+              │ vac_main1    │
+              └──────┬───────┘
+                     │
+                     │ ROS Commands
+                     ▼
+              ┌──────────────┐
+              │ ESP32        │
+              │ Motor Control│
+              └──────┬───────┘
+                     │
+                     ▼
+              ┌──────────────┐
+              │ Motor Driver │
+              └──────┬───────┘
+                     │
+              ┌──────┴──────┐
+              ▼             ▼
+         LEFT MOTOR    RIGHT MOTOR                  ▼
+   ┌───────────────────────────────────────────────────────────────────┐
+   │                       RASPBERRY PI 5                              │
+   │                                                                   │
+   │   esp32_bridge          sllidar_node          bno055_imu          │
+   │        │                     │                     │              │
+   │        ▼                     ▼                     ▼              │
+   │  /vac_main1/           /vac_main1/scan      /vac_main1/imu        │
+   │    wheel_ticks               │              /vac_main1/imu/status │
+   │    joint_states              │                     │              │
+   │    odom                      ▼                     │              │
+   │    odom→base_footprint  slam_toolbox               │              │
+   │        │                     │                     │              │
+   │        │                     ▼                     │              │
+   │        │                  /map  (global)           │              │
+   │        │                     │                     │              │
+   │        └─────────────────────┴─────────────────────┘              │
+   │                              │                                    │
+   │                              ▼                                    │
+   │                        odom_guard                                 │
+   │                     wheels vs lidar vs IMU                        │
+   │                              │                                    │
+   │                              ▼                                    │
+   │              /vac_main1/wheel_slip, map_freeze                    │
+   │              (hold the map while the robot is crashing)           │
+   └───────────────────────────────┬───────────────────────────────────┘
+                                   │
+                                   │  DDS, domain 1
+                                   ▼
+                      ┌────────────────────────┐
+                      │        LAPTOP          │
+                      │  ./laptop.sh    RViz   │
+                      │  ./laptop.sh imu       │
+                      │  ./launch/realbot/laptop_encoders.sh  │
+                      │  browser :8080         │
+                      └────────────────────────┘
+```
+
+`/map`, `/tf`, `/tf_static` and `/clock` are **global**, not namespaced —
+slam_toolbox resolves them absolutely and ignores the namespace. Everything
+else above is under `/vac_main1/`. The reasoning is in
+[flow.md](flow.md#namespace-rules).
