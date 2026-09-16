@@ -1,8 +1,25 @@
+/*
+ * NEXVA ESP32 MICRO-ROS FIRMWARE
+ * --------------------------------
+ * Automatic ESP32 restart on Micro-ROS Agent disconnect.
+ *
+ * ROS 2:
+ *   /cmd_vel
+ *   /odom
+ *   /enco/left
+ *   /enco/right
+ *   /tf
+ *
+ * Frames:
+ *   odom -> base_footprint
+ */
+
 #include <Arduino.h>
 
 #include <micro_ros_arduino.h>
 
 #include <rcl/rcl.h>
+#include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 
@@ -16,7 +33,7 @@
 
 
 // ============================================================
-//                     MOTOR PINS
+// MOTOR PINS
 // ============================================================
 
 #define LEFT_IN1   26
@@ -29,85 +46,68 @@
 
 
 // ============================================================
-//                    ENCODER PINS
+// ENCODER PINS
 // ============================================================
 
-#define RIGHT_ENCODER_A  32
-#define RIGHT_ENCODER_B  33
+#define RIGHT_ENCODER_A 32
+#define RIGHT_ENCODER_B 33
 
-#define LEFT_ENCODER_A   22
+#define LEFT_ENCODER_A  22
 #define LEFT_ENCODER_B  21
 
 
 // ============================================================
-//                     MOTOR SETTINGS
+// MOTOR PARAMETERS
 // ============================================================
 
-#define PWM_FREQ  1000
-#define PWM_BITS  8
-#define MAX_PWM   255
+#define PWM_FREQ       1000
+#define PWM_RESOLUTION 8
 
-#define MAX_LINEAR_SPEED  0.30f
-#define MAX_ANGULAR_SPEED 2.0f
+#define MAX_PWM 255
 
-
-// ============================================================
-//                  ROBOT DIMENSIONS
-// ============================================================
-
-// Wheel diameter = 67 mm
-#define WHEEL_DIAMETER  0.067f
-
-// Wheel separation = 245 mm
-#define WHEEL_BASE      0.245f
-
-// Encoder counts per wheel revolution
-#define ENCODER_CPR     662.0f
+#define MAX_LINEAR_SPEED  0.30
+#define MAX_ANGULAR_SPEED 2.0
 
 
 // ============================================================
-//                  COMMUNICATION SETTINGS
+// ROBOT PARAMETERS
 // ============================================================
 
-#define CMD_VEL_TIMEOUT_MS      500
-#define ODOM_PUBLISH_PERIOD_MS  50
-#define AGENT_CHECK_PERIOD_MS   500
+#define WHEEL_DIAMETER 0.067
+#define WHEEL_RADIUS   (WHEEL_DIAMETER / 2.0)
 
-// Time synchronization timeout
-#define TIME_SYNC_TIMEOUT_MS    1000
+#define WHEEL_BASE 0.245
 
-
-// ============================================================
-//                  ENCODER VARIABLES
-// ============================================================
-
-volatile long leftTicks = 0;
-volatile long rightTicks = 0;
+#define ENCODER_CPR 662.0
 
 
 // ============================================================
-//                  MICRO-ROS OBJECTS
+// TIMING
 // ============================================================
 
-rcl_allocator_t allocator;
+#define CMD_TIMEOUT_MS       500
+#define ODOM_PERIOD_MS        50
+#define AGENT_CHECK_PERIOD_MS 500
 
-rclc_support_t support;
+#define RESTART_DELAY_MS     1000
+
+
+// ============================================================
+// MICRO-ROS OBJECTS
+// ============================================================
 
 rcl_node_t node;
+rcl_subscription_t cmd_vel_subscriber;
+
+rcl_publisher_t left_encoder_publisher;
+rcl_publisher_t right_encoder_publisher;
+rcl_publisher_t odom_publisher;
+rcl_publisher_t tf_publisher;
 
 rclc_executor_t executor;
+rclc_support_t support;
 
-rcl_subscription_t cmd_vel_sub;
-
-rcl_publisher_t left_encoder_pub;
-rcl_publisher_t right_encoder_pub;
-rcl_publisher_t odom_pub;
-rcl_publisher_t tf_pub;
-
-
-// ============================================================
-//                  ROS MESSAGES
-// ============================================================
+rcl_allocator_t allocator;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 
@@ -117,40 +117,11 @@ std_msgs__msg__Int32 right_encoder_msg;
 nav_msgs__msg__Odometry odom_msg;
 
 tf2_msgs__msg__TFMessage tf_msg;
+geometry_msgs__msg__TransformStamped tf_transform;
 
 
 // ============================================================
-//                  ROBOT ODOMETRY
-// ============================================================
-
-float odom_x = 0.0f;
-float odom_y = 0.0f;
-float odom_theta = 0.0f;
-
-long previousLeftTicks = 0;
-long previousRightTicks = 0;
-
-
-// ============================================================
-//                  TIMING VARIABLES
-// ============================================================
-
-unsigned long lastCmdVelTime = 0;
-
-unsigned long lastOdomPublishTime = 0;
-
-unsigned long lastAgentCheckTime = 0;
-
-
-// ============================================================
-//                  TIME SYNCHRONIZATION
-// ============================================================
-
-bool time_synchronized = false;
-
-
-// ============================================================
-//                  MICRO-ROS STATE
+// STATE
 // ============================================================
 
 enum AgentState
@@ -161,71 +132,86 @@ enum AgentState
   AGENT_DISCONNECTED
 };
 
-AgentState agentState = WAITING_AGENT;
+AgentState agent_state = WAITING_AGENT;
 
 
 // ============================================================
-//              MICRO-ROS INITIALIZATION FLAGS
+// ENCODERS
 // ============================================================
 
-bool support_initialized = false;
-
-bool node_initialized = false;
-
-bool left_encoder_pub_initialized = false;
-
-bool right_encoder_pub_initialized = false;
-
-bool odom_pub_initialized = false;
-
-bool tf_pub_initialized = false;
-
-bool cmd_vel_sub_initialized = false;
-
-bool executor_initialized = false;
+volatile long left_encoder_count = 0;
+volatile long right_encoder_count = 0;
 
 
 // ============================================================
-//                  ENCODER INTERRUPTS
+// ODOMETRY
 // ============================================================
 
-void IRAM_ATTR leftEncoderISR()
+double x_position = 0.0;
+double y_position = 0.0;
+double theta_position = 0.0;
+
+long previous_left_count = 0;
+long previous_right_count = 0;
+
+unsigned long last_odom_time = 0;
+
+
+// ============================================================
+// COMMAND
+// ============================================================
+
+unsigned long last_cmd_time = 0;
+
+float current_linear = 0.0;
+float current_angular = 0.0;
+
+
+// ============================================================
+// FLAGS
+// ============================================================
+
+bool odom_message_initialized = false;
+bool tf_message_initialized = false;
+
+
+// ============================================================
+// ERROR HANDLING
+// ============================================================
+
+void error_loop()
 {
-  int A = digitalRead(LEFT_ENCODER_A);
-  int B = digitalRead(LEFT_ENCODER_B);
+  stopMotors();
 
-  if (A == B)
+  while (true)
   {
-    leftTicks++;
-  }
-  else
-  {
-    leftTicks--;
+    delay(100);
   }
 }
 
 
-void IRAM_ATTR rightEncoderISR()
-{
-  int A = digitalRead(RIGHT_ENCODER_A);
-  int B = digitalRead(RIGHT_ENCODER_B);
+#define RCCHECK(fn)                                      \
+  {                                                      \
+    rcl_ret_t temp_rc = fn;                              \
+    if (temp_rc != RCL_RET_OK)                           \
+    {                                                    \
+      error_loop();                                      \
+    }                                                    \
+  }
 
-  if (A == B)
-  {
-    rightTicks++;
+
+#define RCSOFTCHECK(fn)                                  \
+  {                                                      \
+    rcl_ret_t temp_rc = fn;                              \
+    (void)temp_rc;                                       \
   }
-  else
-  {
-    rightTicks--;
-  }
-}
 
 
 // ============================================================
-//                       LEFT MOTOR
+// MOTOR CONTROL
 // ============================================================
 
-void leftMotor(int pwm)
+void setLeftMotor(int pwm)
 {
   pwm = constrain(pwm, -MAX_PWM, MAX_PWM);
 
@@ -233,31 +219,24 @@ void leftMotor(int pwm)
   {
     digitalWrite(LEFT_IN1, HIGH);
     digitalWrite(LEFT_IN2, LOW);
-
-    ledcWrite(LEFT_ENA, pwm);
+    analogWrite(LEFT_ENA, pwm);
   }
   else if (pwm < 0)
   {
     digitalWrite(LEFT_IN1, LOW);
     digitalWrite(LEFT_IN2, HIGH);
-
-    ledcWrite(LEFT_ENA, -pwm);
+    analogWrite(LEFT_ENA, -pwm);
   }
   else
   {
     digitalWrite(LEFT_IN1, LOW);
     digitalWrite(LEFT_IN2, LOW);
-
-    ledcWrite(LEFT_ENA, 0);
+    analogWrite(LEFT_ENA, 0);
   }
 }
 
 
-// ============================================================
-//                       RIGHT MOTOR
-// ============================================================
-
-void rightMotor(int pwm)
+void setRightMotor(int pwm)
 {
   pwm = constrain(pwm, -MAX_PWM, MAX_PWM);
 
@@ -265,57 +244,63 @@ void rightMotor(int pwm)
   {
     digitalWrite(RIGHT_IN1, HIGH);
     digitalWrite(RIGHT_IN2, LOW);
-
-    ledcWrite(RIGHT_ENB, pwm);
+    analogWrite(RIGHT_ENB, pwm);
   }
   else if (pwm < 0)
   {
     digitalWrite(RIGHT_IN1, LOW);
     digitalWrite(RIGHT_IN2, HIGH);
-
-    ledcWrite(RIGHT_ENB, -pwm);
+    analogWrite(RIGHT_ENB, -pwm);
   }
   else
   {
     digitalWrite(RIGHT_IN1, LOW);
     digitalWrite(RIGHT_IN2, LOW);
-
-    ledcWrite(RIGHT_ENB, 0);
+    analogWrite(RIGHT_ENB, 0);
   }
 }
 
 
-// ============================================================
-//                     STOP MOTORS
-// ============================================================
-
 void stopMotors()
 {
-  leftMotor(0);
-  rightMotor(0);
+  setLeftMotor(0);
+  setRightMotor(0);
+
+  current_linear = 0.0;
+  current_angular = 0.0;
 }
 
 
 // ============================================================
-//                   RESET ENCODERS
+// ENCODER INTERRUPTS
 // ============================================================
 
-void resetEncoders()
+void IRAM_ATTR leftEncoderISR()
 {
-  noInterrupts();
+  int a = digitalRead(LEFT_ENCODER_A);
+  int b = digitalRead(LEFT_ENCODER_B);
 
-  leftTicks = 0;
-  rightTicks = 0;
+  if (a == b)
+    left_encoder_count++;
+  else
+    left_encoder_count--;
+}
 
-  interrupts();
 
-  previousLeftTicks = 0;
-  previousRightTicks = 0;
+void IRAM_ATTR rightEncoderISR()
+{
+  int a = digitalRead(RIGHT_ENCODER_A);
+  int b = digitalRead(RIGHT_ENCODER_B);
+
+  if (a == b)
+    right_encoder_count++;
+  else
+    right_encoder_count--;
 }
 
 
 // ============================================================
-//                    CMD_VEL CALLBACK
+// CMD_VEL CALLBACK
 // ============================================================
 
 void cmdVelCallback(const void *msgin)
@@ -323,87 +308,69 @@ void cmdVelCallback(const void *msgin)
   const geometry_msgs__msg__Twist *msg =
       (const geometry_msgs__msg__Twist *)msgin;
 
-  float linear_x = msg->linear.x;
-
-  float angular_z = msg->angular.z;
-
-
-  // ----------------------------------------------------------
-  // Safety timer
-  // ----------------------------------------------------------
-
-  lastCmdVelTime = millis();
-
-
-  // ----------------------------------------------------------
-  // Limit commands
-  // ----------------------------------------------------------
-
-  linear_x = constrain(
-      linear_x,
+  current_linear = constrain(
+      msg->linear.x,
       -MAX_LINEAR_SPEED,
-      MAX_LINEAR_SPEED
-  );
+      MAX_LINEAR_SPEED);
 
-  angular_z = constrain(
-      angular_z,
+  current_angular = constrain(
+      msg->angular.z,
       -MAX_ANGULAR_SPEED,
-      MAX_ANGULAR_SPEED
-  );
+      MAX_ANGULAR_SPEED);
 
 
-  // ----------------------------------------------------------
   // Differential drive
-  //
-  // left  = v - omega * wheel_base / 2
-  // right = v + omega * wheel_base / 2
-  // ----------------------------------------------------------
+  double left_velocity =
+      current_linear -
+      (current_angular * WHEEL_BASE / 2.0);
 
-  float leftVelocity =
-      linear_x -
-      (angular_z * WHEEL_BASE / 2.0f);
-
-  float rightVelocity =
-      linear_x +
-      (angular_z * WHEEL_BASE / 2.0f);
+  double right_velocity =
+      current_linear +
+      (current_angular * WHEEL_BASE / 2.0);
 
 
-  // ----------------------------------------------------------
-  // Convert velocity to PWM
-  // ----------------------------------------------------------
+  // Convert wheel velocity to PWM
+  int left_pwm =
+      (int)((left_velocity / MAX_LINEAR_SPEED) * 255.0);
 
-  int leftPWM =
-      (int)(
-          (leftVelocity / MAX_LINEAR_SPEED)
-          * MAX_PWM
-      );
-
-  int rightPWM =
-      (int)(
-          (rightVelocity / MAX_LINEAR_SPEED)
-          * MAX_PWM
-      );
+  int right_pwm =
+      (int)((right_velocity / MAX_LINEAR_SPEED) * 255.0);
 
 
-  leftPWM =
-      constrain(leftPWM, -MAX_PWM, MAX_PWM);
-
-  rightPWM =
-      constrain(rightPWM, -MAX_PWM, MAX_PWM);
+  left_pwm = constrain(left_pwm, -255, 255);
+  right_pwm = constrain(right_pwm, -255, 255);
 
 
-  // ----------------------------------------------------------
-  // Drive motors
-  // ----------------------------------------------------------
+  setLeftMotor(left_pwm);
+  setRightMotor(right_pwm);
 
-  leftMotor(leftPWM);
-
-  rightMotor(rightPWM);
+  last_cmd_time = millis();
 }
 
 
 // ============================================================
-//              INITIALIZE ODOM MESSAGE
+// RESET ODOMETRY
+// ============================================================
+
+void resetOdometry()
+{
+  x_position = 0.0;
+  y_position = 0.0;
+  theta_position = 0.0;
+
+  noInterrupts();
+
+  previous_left_count = left_encoder_count;
+  previous_right_count = right_encoder_count;
+
+  interrupts();
+
+  last_odom_time = millis();
+}
+
+
+// ============================================================
+// INITIALIZE ODOM MESSAGE
 // ============================================================
 
 bool initializeOdomMessage()
@@ -413,37 +380,34 @@ bool initializeOdomMessage()
     return false;
   }
 
-
-  // ----------------------------------------------------------
-  // Header frame
-  // ----------------------------------------------------------
-
   odom_msg.header.frame_id.data =
       (char *)"odom";
 
-  odom_msg.header.frame_id.size = 4;
+  odom_msg.header.frame_id.size =
+      strlen("odom");
 
-  odom_msg.header.frame_id.capacity = 5;
+  odom_msg.header.frame_id.capacity =
+      strlen("odom") + 1;
 
-
-  // ----------------------------------------------------------
-  // Child frame
-  // ----------------------------------------------------------
 
   odom_msg.child_frame_id.data =
       (char *)"base_footprint";
 
-  odom_msg.child_frame_id.size = 14;
+  odom_msg.child_frame_id.size =
+      strlen("base_footprint");
 
-  odom_msg.child_frame_id.capacity = 15;
+  odom_msg.child_frame_id.capacity =
+      strlen("base_footprint") + 1;
 
+
+  odom_message_initialized = true;
 
   return true;
 }
 
 
 // ============================================================
-//                INITIALIZE TF MESSAGE
+// INITIALIZE TF MESSAGE
 // ============================================================
 
 bool initializeTFMessage()
@@ -453,109 +417,48 @@ bool initializeTFMessage()
     return false;
   }
 
-
-  if (!geometry_msgs__msg__TransformStamped__Sequence__init(
-        &tf_msg.transforms,
-        1))
+  if (!geometry_msgs__msg__TransformStamped__init(&tf_transform))
   {
     return false;
   }
 
-
-  // ----------------------------------------------------------
-  // Parent frame
-  // ----------------------------------------------------------
-
-  tf_msg.transforms.data[0].header.frame_id.data =
+  tf_transform.header.frame_id.data =
       (char *)"odom";
 
-  tf_msg.transforms.data[0].header.frame_id.size = 4;
+  tf_transform.header.frame_id.size =
+      strlen("odom");
 
-  tf_msg.transforms.data[0].header.frame_id.capacity = 5;
+  tf_transform.header.frame_id.capacity =
+      strlen("odom") + 1;
 
 
-  // ----------------------------------------------------------
-  // Child frame
-  // ----------------------------------------------------------
-
-  tf_msg.transforms.data[0].child_frame_id.data =
+  tf_transform.child_frame_id.data =
       (char *)"base_footprint";
 
-  tf_msg.transforms.data[0].child_frame_id.size = 14;
+  tf_transform.child_frame_id.size =
+      strlen("base_footprint");
 
-  tf_msg.transforms.data[0].child_frame_id.capacity = 15;
-
-
-  return true;
-}
+  tf_transform.child_frame_id.capacity =
+      strlen("base_footprint") + 1;
 
 
-// ============================================================
-//              SYNCHRONIZE ESP32 CLOCK
-// ============================================================
+  tf_msg.transforms.data = &tf_transform;
+  tf_msg.transforms.size = 1;
+  tf_msg.transforms.capacity = 1;
 
-bool synchronizeTime()
-{
-  Serial.println();
-  Serial.println(
-      "Synchronizing ESP32 time with micro-ROS Agent..."
-  );
-
-
-  if (rmw_uros_sync_session(TIME_SYNC_TIMEOUT_MS)
-      != RMW_RET_OK)
-  {
-    Serial.println(
-        "ERROR: Time synchronization failed"
-    );
-
-    time_synchronized = false;
-
-    return false;
-  }
-
-
-  if (!rmw_uros_epoch_synchronized())
-  {
-    Serial.println(
-        "ERROR: Epoch is NOT synchronized"
-    );
-
-    time_synchronized = false;
-
-    return false;
-  }
-
-
-  time_synchronized = true;
-
-
-  Serial.println(
-      "Time synchronization successful."
-  );
+  tf_message_initialized = true;
 
   return true;
 }
 
 
 // ============================================================
-//                CREATE MICRO-ROS ENTITIES
+// CREATE MICRO-ROS ENTITIES
 // ============================================================
 
 bool createEntities()
 {
-  Serial.println();
-  Serial.println(
-      "Creating micro-ROS entities..."
-  );
-
-
-  // ----------------------------------------------------------
-  // Allocator
-  // ----------------------------------------------------------
-
-  allocator =
-      rcl_get_default_allocator();
+  allocator = rcl_get_default_allocator();
 
 
   // ----------------------------------------------------------
@@ -563,19 +466,13 @@ bool createEntities()
   // ----------------------------------------------------------
 
   if (rclc_support_init(
-        &support,
-        0,
-        NULL,
-        &allocator) != RCL_RET_OK)
+          &support,
+          0,
+          NULL,
+          &allocator) != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: rclc_support_init failed"
-    );
-
     return false;
   }
-
-  support_initialized = true;
 
 
   // ----------------------------------------------------------
@@ -583,172 +480,115 @@ bool createEntities()
   // ----------------------------------------------------------
 
   if (rclc_node_init_default(
-        &node,
-        "nexva_esp32",
-        "",
-        &support) != RCL_RET_OK)
+          &node,
+          "nexva_esp32",
+          "",
+          &support) != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: node initialization failed"
-    );
-
     return false;
   }
 
-  node_initialized = true;
-
 
   // ----------------------------------------------------------
-  // /cmd_vel subscriber
+  // CMD_VEL Subscriber
   // ----------------------------------------------------------
 
   if (rclc_subscription_init_default(
-        &cmd_vel_sub,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(
-            geometry_msgs,
-            msg,
-            Twist),
-        "/cmd_vel") != RCL_RET_OK)
+          &cmd_vel_subscriber,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(
+              geometry_msgs,
+              msg,
+              Twist),
+          "/cmd_vel") != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: /cmd_vel subscriber failed"
-    );
-
     return false;
   }
 
-  cmd_vel_sub_initialized = true;
-
 
   // ----------------------------------------------------------
-  // /enco/left publisher
+  // LEFT ENCODER
   // ----------------------------------------------------------
 
   if (rclc_publisher_init_default(
-        &left_encoder_pub,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(
-            std_msgs,
-            msg,
-            Int32),
-        "/enco/left") != RCL_RET_OK)
+          &left_encoder_publisher,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(
+              std_msgs,
+              msg,
+              Int32),
+          "/enco/left") != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: /enco/left publisher failed"
-    );
-
     return false;
   }
 
-  left_encoder_pub_initialized = true;
-
 
   // ----------------------------------------------------------
-  // /enco/right publisher
+  // RIGHT ENCODER
   // ----------------------------------------------------------
 
   if (rclc_publisher_init_default(
-        &right_encoder_pub,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(
-            std_msgs,
-            msg,
-            Int32),
-        "/enco/right") != RCL_RET_OK)
+          &right_encoder_publisher,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(
+              std_msgs,
+              msg,
+              Int32),
+          "/enco/right") != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: /enco/right publisher failed"
-    );
-
     return false;
   }
 
-  right_encoder_pub_initialized = true;
-
 
   // ----------------------------------------------------------
-  // /odom publisher
+  // ODOM
   // ----------------------------------------------------------
 
   if (rclc_publisher_init_default(
-        &odom_pub,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(
-            nav_msgs,
-            msg,
-            Odometry),
-        "/odom") != RCL_RET_OK)
+          &odom_publisher,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(
+              nav_msgs,
+              msg,
+              Odometry),
+          "/odom") != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: /odom publisher failed"
-    );
-
     return false;
   }
 
-  odom_pub_initialized = true;
-
 
   // ----------------------------------------------------------
-  // /tf publisher
+  // TF
   // ----------------------------------------------------------
 
   if (rclc_publisher_init_default(
-        &tf_pub,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(
-            tf2_msgs,
-            msg,
-            TFMessage),
-        "/tf") != RCL_RET_OK)
+          &tf_publisher,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(
+              tf2_msgs,
+              msg,
+              TFMessage),
+          "/tf") != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: /tf publisher failed"
-    );
-
     return false;
   }
 
-  tf_pub_initialized = true;
-
 
   // ----------------------------------------------------------
-  // Initialize messages
+  // Messages
   // ----------------------------------------------------------
+
+  geometry_msgs__msg__Twist__init(&cmd_vel_msg);
+
+  std_msgs__msg__Int32__init(&left_encoder_msg);
+  std_msgs__msg__Int32__init(&right_encoder_msg);
+
 
   if (!initializeOdomMessage())
-  {
-    Serial.println(
-        "ERROR: Odometry message initialization failed"
-    );
-
     return false;
-  }
-
 
   if (!initializeTFMessage())
-  {
-    Serial.println(
-        "ERROR: TF message initialization failed"
-    );
-
     return false;
-  }
-
-
-  // ----------------------------------------------------------
-  // TIME SYNCHRONIZATION
-  // ----------------------------------------------------------
-
-  if (!synchronizeTime())
-  {
-    Serial.println(
-        "ERROR: Cannot synchronize time"
-    );
-
-    return false;
-  }
 
 
   // ----------------------------------------------------------
@@ -756,496 +596,242 @@ bool createEntities()
   // ----------------------------------------------------------
 
   if (rclc_executor_init(
-        &executor,
-        &support.context,
-        1,
-        &allocator) != RCL_RET_OK)
+          &executor,
+          &support.context,
+          1,
+          &allocator) != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: executor initialization failed"
-    );
-
     return false;
   }
-
-  executor_initialized = true;
 
 
   if (rclc_executor_add_subscription(
-        &executor,
-        &cmd_vel_sub,
-        &cmd_vel_msg,
-        &cmdVelCallback,
-        ON_NEW_DATA) != RCL_RET_OK)
+          &executor,
+          &cmd_vel_subscriber,
+          &cmd_vel_msg,
+          &cmdVelCallback,
+          ON_NEW_DATA) != RCL_RET_OK)
   {
-    Serial.println(
-        "ERROR: executor subscription failed"
-    );
-
     return false;
   }
 
 
-  // ----------------------------------------------------------
-  // Reset odometry starting point
-  // ----------------------------------------------------------
+  resetOdometry();
 
-  noInterrupts();
-
-  previousLeftTicks = leftTicks;
-
-  previousRightTicks = rightTicks;
-
-  interrupts();
-
-
-  odom_x = 0.0f;
-
-  odom_y = 0.0f;
-
-  odom_theta = 0.0f;
-
-
-  lastCmdVelTime = millis();
-
-  lastOdomPublishTime = millis();
-
+  last_cmd_time = millis();
 
   Serial.println();
-  Serial.println(
-      "micro-ROS entities created successfully."
-  );
-
-  Serial.println(
-      "ESP32 time synchronized."
-  );
+  Serial.println("--------------------------------");
+  Serial.println("MICRO-ROS ENTITIES CREATED");
+  Serial.println("Node: /nexva_esp32");
+  Serial.println("Session: NEW");
+  Serial.println("--------------------------------");
+  Serial.println();
 
   return true;
 }
 
 
 // ============================================================
-//                DESTROY MICRO-ROS ENTITIES
+// DESTROY MICRO-ROS ENTITIES
 // ============================================================
 
 void destroyEntities()
 {
-  Serial.println(
-      "Destroying micro-ROS entities..."
-  );
+  Serial.println("Destroying Micro-ROS entities...");
+
+  stopMotors();
 
 
-  // ----------------------------------------------------------
-  // Executor
-  // ----------------------------------------------------------
-
-  if (executor_initialized)
+  if (executor.context != NULL)
   {
     rclc_executor_fini(&executor);
-
-    executor_initialized = false;
   }
 
 
-  // ----------------------------------------------------------
-  // TF publisher
-  // ----------------------------------------------------------
-
-  if (tf_pub_initialized)
+  if (rcl_publisher_fini(
+          &left_encoder_publisher,
+          &node) != RCL_RET_OK)
   {
-    rcl_publisher_fini(
-        &tf_pub,
-        &node
-    );
-
-    tf_pub_initialized = false;
   }
 
-
-  // ----------------------------------------------------------
-  // Odom publisher
-  // ----------------------------------------------------------
-
-  if (odom_pub_initialized)
+  if (rcl_publisher_fini(
+          &right_encoder_publisher,
+          &node) != RCL_RET_OK)
   {
-    rcl_publisher_fini(
-        &odom_pub,
-        &node
-    );
-
-    odom_pub_initialized = false;
   }
 
-
-  // ----------------------------------------------------------
-  // Right encoder publisher
-  // ----------------------------------------------------------
-
-  if (right_encoder_pub_initialized)
+  if (rcl_publisher_fini(
+          &odom_publisher,
+          &node) != RCL_RET_OK)
   {
-    rcl_publisher_fini(
-        &right_encoder_pub,
-        &node
-    );
-
-    right_encoder_pub_initialized = false;
   }
 
-
-  // ----------------------------------------------------------
-  // Left encoder publisher
-  // ----------------------------------------------------------
-
-  if (left_encoder_pub_initialized)
+  if (rcl_publisher_fini(
+          &tf_publisher,
+          &node) != RCL_RET_OK)
   {
-    rcl_publisher_fini(
-        &left_encoder_pub,
-        &node
-    );
-
-    left_encoder_pub_initialized = false;
   }
 
 
-  // ----------------------------------------------------------
-  // cmd_vel subscriber
-  // ----------------------------------------------------------
-
-  if (cmd_vel_sub_initialized)
+  if (rcl_subscription_fini(
+          &cmd_vel_subscriber,
+          &node) != RCL_RET_OK)
   {
-    rcl_subscription_fini(
-        &cmd_vel_sub,
-        &node
-    );
-
-    cmd_vel_sub_initialized = false;
   }
 
 
-  // ----------------------------------------------------------
-  // Node
-  // ----------------------------------------------------------
-
-  if (node_initialized)
+  if (rcl_node_fini(&node) != RCL_RET_OK)
   {
-    rcl_node_fini(&node);
-
-    node_initialized = false;
   }
 
 
-  // ----------------------------------------------------------
-  // Support
-  // ----------------------------------------------------------
-
-  if (support_initialized)
+  if (rclc_support_fini(&support) != RCL_RET_OK)
   {
-    rclc_support_fini(&support);
-
-    support_initialized = false;
   }
 
 
-  // ----------------------------------------------------------
-  // Free TF sequence
-  // ----------------------------------------------------------
+  odom_message_initialized = false;
+  tf_message_initialized = false;
 
-  if (tf_msg.transforms.data != NULL)
-  {
-    geometry_msgs__msg__TransformStamped__Sequence__fini(
-        &tf_msg.transforms
-    );
-  }
-
-
-  tf_msg.transforms.data = NULL;
-
-  tf_msg.transforms.size = 0;
-
-  tf_msg.transforms.capacity = 0;
-
-
-  time_synchronized = false;
-
-
-  Serial.println(
-      "micro-ROS entities destroyed."
-  );
+  Serial.println("Micro-ROS entities destroyed.");
 }
 
 
 // ============================================================
-//              UPDATE ODOMETRY FROM ENCODERS
+// CHECK AGENT
 // ============================================================
 
-void updateOdometry()
+bool agentAvailable()
 {
-  long currentLeftTicks;
+  rcl_ret_t rc =
+      rmw_uros_ping_agent(100, 1);
 
-  long currentRightTicks;
-
-
-  // ----------------------------------------------------------
-  // Read encoder values safely
-  // ----------------------------------------------------------
-
-  noInterrupts();
-
-  currentLeftTicks = leftTicks;
-
-  currentRightTicks = rightTicks;
-
-  interrupts();
-
-
-  // ----------------------------------------------------------
-  // Tick difference
-  // ----------------------------------------------------------
-
-  long deltaLeftTicks =
-      currentLeftTicks -
-      previousLeftTicks;
-
-  long deltaRightTicks =
-      currentRightTicks -
-      previousRightTicks;
-
-
-  previousLeftTicks =
-      currentLeftTicks;
-
-  previousRightTicks =
-      currentRightTicks;
-
-
-  // ----------------------------------------------------------
-  // Wheel circumference
-  // ----------------------------------------------------------
-
-  const float wheelCircumference =
-      PI * WHEEL_DIAMETER;
-
-
-  // ----------------------------------------------------------
-  // Distance per encoder tick
-  // ----------------------------------------------------------
-
-  const float distancePerTick =
-      wheelCircumference /
-      ENCODER_CPR;
-
-
-  // ----------------------------------------------------------
-  // Individual wheel distance
-  // ----------------------------------------------------------
-
-  float leftDistance =
-      deltaLeftTicks *
-      distancePerTick;
-
-  float rightDistance =
-      deltaRightTicks *
-      distancePerTick;
-
-
-  // ----------------------------------------------------------
-  // Robot center displacement
-  // ----------------------------------------------------------
-
-  float centerDistance =
-      (leftDistance + rightDistance)
-      / 2.0f;
-
-
-  // ----------------------------------------------------------
-  // Robot angular displacement
-  // ----------------------------------------------------------
-
-  float deltaTheta =
-      (rightDistance - leftDistance)
-      / WHEEL_BASE;
-
-
-  // ----------------------------------------------------------
-  // Midpoint integration
-  // ----------------------------------------------------------
-
-  float midpointTheta =
-      odom_theta +
-      (deltaTheta / 2.0f);
-
-
-  odom_x +=
-      centerDistance *
-      cos(midpointTheta);
-
-  odom_y +=
-      centerDistance *
-      sin(midpointTheta);
-
-  odom_theta += deltaTheta;
-
-
-  // ----------------------------------------------------------
-  // Normalize angle
-  // ----------------------------------------------------------
-
-  while (odom_theta > PI)
-  {
-    odom_theta -= 2.0f * PI;
-  }
-
-  while (odom_theta < -PI)
-  {
-    odom_theta += 2.0f * PI;
-  }
+  return rc == RCL_RET_OK;
 }
 
 
 // ============================================================
-//                  PUBLISH ENCODERS
+// PUBLISH ENCODERS
 // ============================================================
 
 void publishEncoders()
 {
-  long left;
-
-  long right;
-
-
   noInterrupts();
 
-  left = leftTicks;
-
-  right = rightTicks;
+  long left_count = left_encoder_count;
+  long right_count = right_encoder_count;
 
   interrupts();
 
 
-  left_encoder_msg.data =
-      (int32_t)left;
-
-  right_encoder_msg.data =
-      (int32_t)right;
+  left_encoder_msg.data = (int32_t)left_count;
+  right_encoder_msg.data = (int32_t)right_count;
 
 
-  rcl_publish(
-      &left_encoder_pub,
-      &left_encoder_msg,
-      NULL
-  );
+  RCSOFTCHECK(
+      rcl_publish(
+          &left_encoder_publisher,
+          &left_encoder_msg,
+          NULL));
 
 
-  rcl_publish(
-      &right_encoder_pub,
-      &right_encoder_msg,
-      NULL
-  );
+  RCSOFTCHECK(
+      rcl_publish(
+          &right_encoder_publisher,
+          &right_encoder_msg,
+          NULL));
 }
 
 
 // ============================================================
-//                 PUBLISH ODOMETRY + TF
+// PUBLISH ODOMETRY
 // ============================================================
 
 void publishOdometry()
 {
-  // ----------------------------------------------------------
-  // Do not publish timestamped odom/tf until clock sync
-  // ----------------------------------------------------------
+  unsigned long now = millis();
 
-  if (!time_synchronized)
-  {
+  double dt =
+      (now - last_odom_time) / 1000.0;
+
+  if (dt <= 0.0)
     return;
-  }
+
+  last_odom_time = now;
 
 
-  // ----------------------------------------------------------
-  // Update encoder odometry
-  // ----------------------------------------------------------
+  noInterrupts();
 
-  updateOdometry();
+  long left_count = left_encoder_count;
+  long right_count = right_encoder_count;
+
+  interrupts();
 
 
-  // ----------------------------------------------------------
-  // Get synchronized ROS epoch time
-  // ----------------------------------------------------------
+  long delta_left =
+      left_count - previous_left_count;
 
-  int64_t time_ns =
+  long delta_right =
+      right_count - previous_right_count;
+
+
+  previous_left_count = left_count;
+  previous_right_count = right_count;
+
+
+  double left_distance =
+      (delta_left / ENCODER_CPR) *
+      (2.0 * PI * WHEEL_RADIUS);
+
+  double right_distance =
+      (delta_right / ENCODER_CPR) *
+      (2.0 * PI * WHEEL_RADIUS);
+
+
+  double distance =
+      (left_distance + right_distance) / 2.0;
+
+  double delta_theta =
+      (right_distance - left_distance) /
+      WHEEL_BASE;
+
+
+  theta_position += delta_theta;
+
+  x_position +=
+      distance * cos(theta_position);
+
+  y_position +=
+      distance * sin(theta_position);
+
+
+  double linear_velocity =
+      distance / dt;
+
+  double angular_velocity =
+      delta_theta / dt;
+
+
+  int64_t stamp =
       rmw_uros_epoch_nanos();
 
 
-  if (time_ns <= 0)
-  {
-    return;
-  }
-
-
-  int32_t sec =
-      (int32_t)(
-          time_ns /
-          1000000000LL
-      );
-
-  uint32_t nanosec =
-      (uint32_t)(
-          time_ns %
-          1000000000LL
-      );
-
-
-  // ----------------------------------------------------------
-  // ODOM timestamp
-  // ----------------------------------------------------------
-
   odom_msg.header.stamp.sec =
-      sec;
+      stamp / 1000000000LL;
 
   odom_msg.header.stamp.nanosec =
-      nanosec;
+      stamp % 1000000000LL;
 
-
-  // ----------------------------------------------------------
-  // TF timestamp
-  // ----------------------------------------------------------
-
-  tf_msg.transforms.data[0]
-      .header.stamp.sec =
-      sec;
-
-  tf_msg.transforms.data[0]
-      .header.stamp.nanosec =
-      nanosec;
-
-
-  // ----------------------------------------------------------
-  // Position
-  // ----------------------------------------------------------
 
   odom_msg.pose.pose.position.x =
-      odom_x;
+      x_position;
 
   odom_msg.pose.pose.position.y =
-      odom_y;
+      y_position;
 
   odom_msg.pose.pose.position.z =
       0.0;
-
-
-  // ----------------------------------------------------------
-  // Orientation quaternion
-  // yaw → quaternion
-  // ----------------------------------------------------------
-
-  float halfYaw =
-      odom_theta / 2.0f;
-
-
-  float sinHalfYaw =
-      sin(halfYaw);
-
-  float cosHalfYaw =
-      cos(halfYaw);
 
 
   odom_msg.pose.pose.orientation.x =
@@ -1255,555 +841,349 @@ void publishOdometry()
       0.0;
 
   odom_msg.pose.pose.orientation.z =
-      sinHalfYaw;
+      sin(theta_position / 2.0);
 
   odom_msg.pose.pose.orientation.w =
-      cosHalfYaw;
+      cos(theta_position / 2.0);
+
+
+  odom_msg.twist.twist.linear.x =
+      linear_velocity;
+
+  odom_msg.twist.twist.angular.z =
+      angular_velocity;
+
+
+  RCSOFTCHECK(
+      rcl_publish(
+          &odom_publisher,
+          &odom_msg,
+          NULL));
 
 
   // ----------------------------------------------------------
-  // TF translation
+  // TF
   // ----------------------------------------------------------
 
-  tf_msg.transforms.data[0]
-      .transform.translation.x =
-      odom_x;
+  tf_transform.header.stamp.sec =
+      odom_msg.header.stamp.sec;
 
-  tf_msg.transforms.data[0]
-      .transform.translation.y =
-      odom_y;
+  tf_transform.header.stamp.nanosec =
+      odom_msg.header.stamp.nanosec;
 
-  tf_msg.transforms.data[0]
-      .transform.translation.z =
+
+  tf_transform.transform.translation.x =
+      x_position;
+
+  tf_transform.transform.translation.y =
+      y_position;
+
+  tf_transform.transform.translation.z =
       0.0;
 
 
-  // ----------------------------------------------------------
-  // TF rotation
-  // ----------------------------------------------------------
-
-  tf_msg.transforms.data[0]
-      .transform.rotation.x =
+  tf_transform.transform.rotation.x =
       0.0;
 
-  tf_msg.transforms.data[0]
-      .transform.rotation.y =
+  tf_transform.transform.rotation.y =
       0.0;
 
-  tf_msg.transforms.data[0]
-      .transform.rotation.z =
-      sinHalfYaw;
+  tf_transform.transform.rotation.z =
+      sin(theta_position / 2.0);
 
-  tf_msg.transforms.data[0]
-      .transform.rotation.w =
-      cosHalfYaw;
+  tf_transform.transform.rotation.w =
+      cos(theta_position / 2.0);
 
 
-  // ----------------------------------------------------------
-  // Publish odometry
-  // ----------------------------------------------------------
-
-  rcl_publish(
-      &odom_pub,
-      &odom_msg,
-      NULL
-  );
-
-
-  // ----------------------------------------------------------
-  // Publish TF
-  // ----------------------------------------------------------
-
-  rcl_publish(
-      &tf_pub,
-      &tf_msg,
-      NULL
-  );
+  RCSOFTCHECK(
+      rcl_publish(
+          &tf_publisher,
+          &tf_msg,
+          NULL));
 }
 
 
 // ============================================================
-//                  SAFETY TIMEOUT
+// AUTOMATIC ESP32 RESTART
 // ============================================================
 
-void checkCmdVelTimeout()
+void restartESP32()
 {
-  if (
-      millis() -
-      lastCmdVelTime >
-      CMD_VEL_TIMEOUT_MS
-     )
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("MICRO-ROS AGENT DISCONNECTED");
+  Serial.println("STOPPING MOTORS");
+  Serial.println("DESTROYING SESSION");
+  Serial.println("RESTARTING ESP32...");
+  Serial.println("================================");
+  Serial.flush();
+
+
+  stopMotors();
+
+  destroyEntities();
+
+  delay(RESTART_DELAY_MS);
+
+
+  // ----------------------------------------------------------
+  // HARD SOFTWARE REBOOT
+  // ----------------------------------------------------------
+
+  ESP.restart();
+
+
+  // Should never reach here
+  while (true)
   {
     stopMotors();
+    delay(100);
   }
 }
 
 
 // ============================================================
-//                 WAIT FOR MICRO-ROS AGENT
-// ============================================================
-
-void waitForAgent()
-{
-  if (
-      millis() -
-      lastAgentCheckTime <
-      AGENT_CHECK_PERIOD_MS
-     )
-  {
-    return;
-  }
-
-
-  lastAgentCheckTime =
-      millis();
-
-
-  Serial.println(
-      "Checking micro-ROS Agent..."
-  );
-
-
-  if (
-      rmw_uros_ping_agent(100, 1)
-      == RMW_RET_OK
-     )
-  {
-    Serial.println(
-        "micro-ROS Agent detected!"
-    );
-
-    agentState =
-        AGENT_AVAILABLE;
-  }
-  else
-  {
-    Serial.println(
-        "Agent not available."
-    );
-  }
-}
-
-
-// ============================================================
-//                         SETUP
+// SETUP
 // ============================================================
 
 void setup()
 {
   Serial.begin(115200);
 
-  delay(500);
+  delay(2000);
 
 
-  // ========================================================
+  // ==========================================================
   // MOTOR SETUP
-  // ========================================================
+  // ==========================================================
 
-  pinMode(
-      LEFT_IN1,
-      OUTPUT
-  );
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(LEFT_ENA, OUTPUT);
 
-  pinMode(
-      LEFT_IN2,
-      OUTPUT
-  );
-
-  pinMode(
-      RIGHT_IN1,
-      OUTPUT
-  );
-
-  pinMode(
-      RIGHT_IN2,
-      OUTPUT
-  );
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+  pinMode(RIGHT_ENB, OUTPUT);
 
 
-  // --------------------------------------------------------
-  // ESP32 Arduino Core 3.x LEDC
-  // --------------------------------------------------------
+  analogWriteFrequency(LEFT_ENA, PWM_FREQ);
+  analogWriteFrequency(RIGHT_ENB, PWM_FREQ);
 
-  ledcAttach(
-      LEFT_ENA,
-      PWM_FREQ,
-      PWM_BITS
-  );
-
-  ledcAttach(
-      RIGHT_ENB,
-      PWM_FREQ,
-      PWM_BITS
-  );
+  analogWriteResolution(LEFT_ENA, PWM_RESOLUTION);
+  analogWriteResolution(RIGHT_ENB, PWM_RESOLUTION);
 
 
   stopMotors();
 
 
-  // ========================================================
+  // ==========================================================
   // ENCODER SETUP
-  // ========================================================
+  // ==========================================================
 
   pinMode(
       LEFT_ENCODER_A,
-      INPUT_PULLUP
-  );
+      INPUT_PULLUP);
 
   pinMode(
       LEFT_ENCODER_B,
-      INPUT_PULLUP
-  );
+      INPUT_PULLUP);
 
   pinMode(
       RIGHT_ENCODER_A,
-      INPUT_PULLUP
-  );
+      INPUT_PULLUP);
 
   pinMode(
       RIGHT_ENCODER_B,
-      INPUT_PULLUP
-  );
+      INPUT_PULLUP);
 
-
-  // --------------------------------------------------------
-  // Encoder interrupts
-  // --------------------------------------------------------
 
   attachInterrupt(
-      digitalPinToInterrupt(
-          LEFT_ENCODER_A
-      ),
+      digitalPinToInterrupt(LEFT_ENCODER_A),
       leftEncoderISR,
-      CHANGE
-  );
-
+      CHANGE);
 
   attachInterrupt(
-      digitalPinToInterrupt(
-          RIGHT_ENCODER_A
-      ),
+      digitalPinToInterrupt(RIGHT_ENCODER_A),
       rightEncoderISR,
-      CHANGE
-  );
+      CHANGE);
 
 
-  resetEncoders();
+  // ==========================================================
+  // MICRO-ROS TRANSPORT
+  // ==========================================================
 
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("NEXVA ESP32 STARTING");
+  Serial.println("================================");
 
-  // ========================================================
-  // MICRO-ROS SERIAL TRANSPORT
-  // ========================================================
+  Serial.println(
+      "Initializing Micro-ROS transport...");
+
 
   set_microros_transports();
 
 
-  // ========================================================
-  // INITIAL STATE
-  // ========================================================
+  delay(2000);
 
-  lastCmdVelTime =
-      millis();
-
-  lastOdomPublishTime =
-      millis();
-
-  lastAgentCheckTime =
-      0;
-
-
-  time_synchronized =
-      false;
-
-
-  agentState =
-      WAITING_AGENT;
-
-
-  // ========================================================
-  // STARTUP INFORMATION
-  // ========================================================
-
-  Serial.println();
 
   Serial.println(
-      "========================================"
-  );
+      "Micro-ROS transport initialized.");
 
   Serial.println(
-      "       NEXVA ESP32 MICRO-ROS"
-  );
-
-  Serial.println(
-      "========================================"
-  );
+      "Waiting for Micro-ROS Agent...");
 
 
-  Serial.println();
-
-  Serial.println("Motor:");
-
-  Serial.println(
-      "  Left  IN1=26 IN2=25 ENA=27"
-  );
-
-  Serial.println(
-      "  Right IN1=18 IN2=19 ENB=23"
-  );
-
-
-  Serial.println();
-
-  Serial.println("Encoder:");
-
-  Serial.println(
-      "  Left  A=22 B=21"
-  );
-
-  Serial.println(
-      "  Right A=32 B=33"
-  );
-
-
-  Serial.println();
-
-  Serial.println("Robot:");
-
-  Serial.println(
-      "  Wheel diameter = 0.067 m"
-  );
-
-  Serial.println(
-      "  Wheel base     = 0.245 m"
-  );
-
-  Serial.println(
-      "  Encoder CPR    = 662"
-  );
-
-
-  Serial.println();
-
-  Serial.println("Frames:");
-
-  Serial.println(
-      "  odom -> base_footprint"
-  );
-
-
-  Serial.println();
-
-  Serial.println("Topics:");
-
-  Serial.println(
-      "  SUB  /cmd_vel"
-  );
-
-  Serial.println(
-      "  PUB  /enco/left"
-  );
-
-  Serial.println(
-      "  PUB  /enco/right"
-  );
-
-  Serial.println(
-      "  PUB  /odom"
-  );
-
-  Serial.println(
-      "  PUB  /tf"
-  );
-
-
-  Serial.println();
-
-  Serial.println(
-      "Waiting for micro-ROS Agent..."
-  );
-
-  Serial.println(
-      "========================================"
-  );
+  agent_state = WAITING_AGENT;
 }
 
 
 // ============================================================
-//                          LOOP
+// LOOP
 // ============================================================
 
 void loop()
 {
-  switch (agentState)
+  static unsigned long last_agent_check = 0;
+  static unsigned long last_odom_publish = 0;
+
+
+  // ==========================================================
+  // WAIT FOR AGENT
+  // ==========================================================
+
+  if (agent_state == WAITING_AGENT)
   {
-
-    // ======================================================
-    // WAITING FOR AGENT
-    // ======================================================
-
-    case WAITING_AGENT:
-
-      stopMotors();
-
-      waitForAgent();
-
-      break;
+    if (millis() - last_agent_check >=
+        AGENT_CHECK_PERIOD_MS)
+    {
+      last_agent_check = millis();
 
 
-    // ======================================================
-    // AGENT FOUND
-    // ======================================================
-
-    case AGENT_AVAILABLE:
-
-      if (createEntities())
+      if (agentAvailable())
       {
         Serial.println();
-
         Serial.println(
-            "========================================"
-        );
+            "Micro-ROS Agent detected.");
 
-        Serial.println(
-            "       MICRO-ROS CONNECTED"
-        );
-
-        Serial.println(
-            "       TIME SYNCHRONIZED"
-        );
-
-        Serial.println(
-            "========================================"
-        );
-
-
-        agentState =
-            AGENT_CONNECTED;
+        agent_state = AGENT_AVAILABLE;
       }
-      else
-      {
-        Serial.println(
-            "Failed to create micro-ROS entities."
-        );
-
-
-        destroyEntities();
-
-
-        agentState =
-            WAITING_AGENT;
-      }
-
-      break;
-
-
-    // ======================================================
-    // NORMAL OPERATION
-    // ======================================================
-
-    case AGENT_CONNECTED:
-    {
-      // ----------------------------------------------------
-      // Process /cmd_vel
-      // ----------------------------------------------------
-
-      rclc_executor_spin_some(
-          &executor,
-          RCL_MS_TO_NS(5)
-      );
-
-
-      // ----------------------------------------------------
-      // Motor safety
-      // ----------------------------------------------------
-
-      checkCmdVelTimeout();
-
-
-      // ----------------------------------------------------
-      // Encoder + odometry
-      // ----------------------------------------------------
-
-      if (
-          millis() -
-          lastOdomPublishTime >=
-          ODOM_PUBLISH_PERIOD_MS
-         )
-      {
-        lastOdomPublishTime =
-            millis();
-
-
-        publishEncoders();
-
-        publishOdometry();
-      }
-
-
-      // ----------------------------------------------------
-      // Check Agent connection
-      // ----------------------------------------------------
-
-      if (
-          millis() -
-          lastAgentCheckTime >=
-          AGENT_CHECK_PERIOD_MS
-         )
-      {
-        lastAgentCheckTime =
-            millis();
-
-
-        if (
-            rmw_uros_ping_agent(100, 1)
-            != RMW_RET_OK
-           )
-        {
-          Serial.println();
-
-          Serial.println(
-              "micro-ROS Agent disconnected!"
-          );
-
-
-          stopMotors();
-
-
-          agentState =
-              AGENT_DISCONNECTED;
-        }
-      }
-
-
-      break;
     }
 
 
-    // ======================================================
-    // AGENT DISCONNECTED
-    // ======================================================
+    stopMotors();
 
-    case AGENT_DISCONNECTED:
+    delay(10);
 
-      stopMotors();
-
-
-      destroyEntities();
-
-
-      Serial.println();
-
-      Serial.println(
-          "Waiting for micro-ROS Agent to reconnect..."
-      );
-
-
-      agentState =
-          WAITING_AGENT;
-
-      break;
+    return;
   }
 
 
-  delay(1);
+  // ==========================================================
+  // CREATE NEW SESSION / ENTITIES
+  // ==========================================================
+
+  if (agent_state == AGENT_AVAILABLE)
+  {
+    Serial.println(
+        "Creating NEW Micro-ROS session...");
+
+
+    if (createEntities())
+    {
+      agent_state = AGENT_CONNECTED;
+
+      Serial.println(
+          "NEW Micro-ROS session CONNECTED.");
+    }
+    else
+    {
+      Serial.println(
+          "Entity creation failed.");
+
+      delay(500);
+
+      // Reboot to guarantee completely clean state
+      ESP.restart();
+    }
+
+    return;
+  }
+
+
+  // ==========================================================
+  // CONNECTED
+  // ==========================================================
+
+  if (agent_state == AGENT_CONNECTED)
+  {
+    // --------------------------------------------------------
+    // Execute ROS callbacks
+    // --------------------------------------------------------
+
+    RCSOFTCHECK(
+        rclc_executor_spin_some(
+            &executor,
+            RCL_MS_TO_NS(5)));
+
+
+    // --------------------------------------------------------
+    // Command timeout
+    // --------------------------------------------------------
+
+    if (millis() - last_cmd_time >
+        CMD_TIMEOUT_MS)
+    {
+      stopMotors();
+    }
+
+
+    // --------------------------------------------------------
+    // Publish encoders + odom
+    // --------------------------------------------------------
+
+    if (millis() - last_odom_publish >=
+        ODOM_PERIOD_MS)
+    {
+      last_odom_publish = millis();
+
+      publishEncoders();
+      publishOdometry();
+    }
+
+
+    // --------------------------------------------------------
+    // Check Micro-ROS Agent
+    // --------------------------------------------------------
+
+    if (millis() - last_agent_check >=
+        AGENT_CHECK_PERIOD_MS)
+    {
+      last_agent_check = millis();
+
+
+      if (!agentAvailable())
+      {
+        agent_state =
+            AGENT_DISCONNECTED;
+      }
+    }
+
+
+    delay(2);
+
+    return;
+  }
+
+
+  // ==========================================================
+  // AGENT DISCONNECTED
+  // ==========================================================
+
+  if (agent_state == AGENT_DISCONNECTED)
+  {
+    restartESP32();
+
+    return;
+  }
 }
