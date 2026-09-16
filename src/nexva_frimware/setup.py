@@ -29,6 +29,8 @@ setup(
     entry_points={
         'console_scripts': [
             'esp32_interface = nexva_frimware.esp32_interface:main',
+            'wheel_joint_publisher = nexva_frimware.wheel_joint_publisher:main',
+            'wheel_odometry = nexva_frimware.wheel_odometry:main',
         ],
     },
 )

@@ -12,7 +12,10 @@
     <parent link="base_footprint"/>
     <child link="base_link"/>
 
-    <origin xyz="0 0 0" rpy="0 0 1.507"/>
+    <!-- base_footprint is base_link projected on the ground: same heading,
+         so this joint carries no rotation. Mounting yaw for the lidar belongs
+         in lidar_joint, not here. -->
+    <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
 

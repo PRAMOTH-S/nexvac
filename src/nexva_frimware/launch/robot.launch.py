@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 # agent ignores it.
 RESET_ESP = (
     "import serial, time; "
-    "s = serial.Serial('/dev/esp', 115200); "
+    "s = serial.Serial('/dev/esp', 460800); "
     "s.dtr = False; s.rts = True; time.sleep(0.15); "
     "s.rts = False; time.sleep(0.05); s.close()"
 )
@@ -41,9 +41,28 @@ def generate_launch_description():
         arguments=[
             'serial',
             '--dev', '/dev/esp',
-            '-b', '115200'
+            '-b', '460800'
         ],
         emulate_tty=True,
+    )
+
+    # Encoder counts -> /joint_states, so robot_state_publisher can place the
+    # wheel links. Derived on this side to keep the serial link free.
+    wheel_joint_publisher = Node(
+        package='nexva_frimware',
+        executable='wheel_joint_publisher',
+        name='wheel_joint_publisher',
+        output='screen',
+    )
+
+    # Encoder counts -> /odom and odom -> base_footprint. Integrated here
+    # rather than on the ESP32 because nav_msgs/Odometry exceeds the serial
+    # MTU and stalls the reliable stream to 1 Hz.
+    wheel_odometry = Node(
+        package='nexva_frimware',
+        executable='wheel_odometry',
+        name='wheel_odometry',
+        output='screen',
     )
 
     # Start the agent only once cleanup has actually exited. Listing both
@@ -55,6 +74,8 @@ def generate_launch_description():
             on_exit=[
                 LogInfo(msg="Port clear, ESP32 reset. Starting Micro-ROS Agent."),
                 micro_ros_agent,
+                wheel_joint_publisher,
+                wheel_odometry,
             ],
         )
     )

@@ -23,10 +23,12 @@
 #include <geometry_msgs/msg/twist.h>
 #include <nav_msgs/msg/odometry.h>
 #include <std_msgs/msg/int32.h>
+#include <geometry_msgs/msg/vector3.h>
 #include <tf2_msgs/msg/tf_message.h>
 #include <geometry_msgs/msg/transform_stamped.h>
 
 #include <rmw_microros/rmw_microros.h>
+#include <uxr/client/profile/transport/custom/custom_transport.h>
 
 // ============================================================
 // MOTOR PINS
@@ -84,6 +86,12 @@
 // the agent is gone. Failed publishes are the reliable signal instead.
 #define PUBLISH_FAILURE_LIMIT 20
 
+// rmw_uros_epoch_nanos() returns time since boot until the session clock is
+// synced against the agent. Unsynced stamps put /tf ~1.7e9 s in the past, so
+// RViz cannot resolve odom -> laser and the scan vanishes under fixed frame
+// odom. Sync once per session, then periodically to cover drift.
+#define TIME_SYNC_PERIOD_MS 10000
+
 // ============================================================
 // DEBUG OUTPUT
 // ============================================================
@@ -109,13 +117,59 @@
 #endif
 
 // ============================================================
+// SERIAL TRANSPORT
+// ============================================================
+// micro_ros_arduino's default transport hardcodes 115200, which caps the link
+// at 11.5 KB/s - below the ~18 KB/s this firmware publishes at 20 Hz. Same
+// callbacks as the stock transport, just a faster line. The agent must be
+// started with a matching -b MICROROS_BAUD.
+
+#define MICROROS_BAUD 460800
+
+// nav_msgs/Odometry is 724 B against a 512 B serial MTU. Publishing it from
+// here fragments every message and the reliable stream then blocks ~1 s per
+// cycle waiting for delivery confirmation, which pins odom -> base_footprint
+// to 1 Hz at any baud rate. Odometry is integrated on the Pi instead, from the
+// encoder counts below - see nexva_frimware/wheel_odometry.py. Set to 1 to put
+// it back on the ESP32.
+#define PUBLISH_ODOM_FROM_ESP32 0
+
+extern "C" bool nexva_transport_open(struct uxrCustomTransport *t) {
+  (void)t;
+  Serial.begin(MICROROS_BAUD);
+  return true;
+}
+
+extern "C" bool nexva_transport_close(struct uxrCustomTransport *t) {
+  (void)t;
+  Serial.end();
+  return true;
+}
+
+extern "C" size_t nexva_transport_write(struct uxrCustomTransport *t,
+                                        const uint8_t *buf, size_t len,
+                                        uint8_t *err) {
+  (void)t;
+  (void)err;
+  return Serial.write(buf, len);
+}
+
+extern "C" size_t nexva_transport_read(struct uxrCustomTransport *t,
+                                       uint8_t *buf, size_t len, int timeout,
+                                       uint8_t *err) {
+  (void)t;
+  (void)err;
+  Serial.setTimeout(timeout);
+  return Serial.readBytes((char *)buf, len);
+}
+
+// ============================================================
 // MICRO-ROS OBJECTS
 // ============================================================
 
 rcl_node_t node;
 rcl_subscription_t cmd_vel_subscriber;
-rcl_publisher_t left_encoder_publisher;
-rcl_publisher_t right_encoder_publisher;
+rcl_publisher_t encoder_publisher;
 rcl_publisher_t odom_publisher;
 rcl_publisher_t tf_publisher;
 
@@ -124,8 +178,7 @@ rclc_support_t support;
 rcl_allocator_t allocator;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
-std_msgs__msg__Int32 left_encoder_msg;
-std_msgs__msg__Int32 right_encoder_msg;
+geometry_msgs__msg__Vector3 encoder_msg;
 nav_msgs__msg__Odometry odom_msg;
 tf2_msgs__msg__TFMessage tf_msg;
 geometry_msgs__msg__TransformStamped tf_transform;
@@ -381,6 +434,11 @@ bool initializeTFMessage() {
 // ============================================================
 // CREATE MICRO-ROS ENTITIES
 // ============================================================
+// Publishers stay RELIABLE on purpose. tf2_ros::TransformListener subscribes
+// to /tf as RELIABLE and offers no way to change that, and RViz/ros2 topic
+// default to RELIABLE too - a BEST_EFFORT publisher simply never matches them.
+// The 1 Hz stall this used to cause was a bandwidth problem, not a QoS one,
+// and is fixed by MICROROS_BAUD above.
 
 bool createEntities() {
   allocator = rcl_get_default_allocator();
@@ -408,20 +466,25 @@ bool createEntities() {
     return false;
   }
 
-  if (rclc_publisher_init_default(&left_encoder_publisher, &node,
-          ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-          "/enco/left") != RCL_RET_OK) {
-    DBGLN("Failed to create left encoder publisher");
+  // Both counts travel in one message. Split across two topics they could
+  // arrive out of step, and the Pi would pair a fresh left against a stale
+  // right - which integrates as a rotation that never happened.
+  //
+  // BEST_EFFORT is essential here, not an optimisation. A reliable publish
+  // calls uxr_run_session_until_confirm_delivery() and blocks until the agent
+  // acknowledges, which times out at RMW_UXRCE_PUBLISH_RELIABLE_TIMEOUT
+  // (1000 ms) and pins the whole control loop to 1 Hz - at any baud rate and
+  // any message size. Nothing but nexva_frimware's own nodes read this topic,
+  // and they subscribe BEST_EFFORT to match; /odom and /tf are re-published
+  // from the Pi as RELIABLE for tf2 and RViz.
+  if (rclc_publisher_init_best_effort(&encoder_publisher, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+          "/enco/counts") != RCL_RET_OK) {
+    DBGLN("Failed to create encoder publisher");
     return false;
   }
 
-  if (rclc_publisher_init_default(&right_encoder_publisher, &node,
-          ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-          "/enco/right") != RCL_RET_OK) {
-    DBGLN("Failed to create right encoder publisher");
-    return false;
-  }
-
+#if PUBLISH_ODOM_FROM_ESP32
   if (rclc_publisher_init_default(&odom_publisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
           "/odom") != RCL_RET_OK) {
@@ -435,10 +498,10 @@ bool createEntities() {
     DBGLN("Failed to create tf publisher");
     return false;
   }
+#endif
 
   geometry_msgs__msg__Twist__init(&cmd_vel_msg);
-  std_msgs__msg__Int32__init(&left_encoder_msg);
-  std_msgs__msg__Int32__init(&right_encoder_msg);
+  geometry_msgs__msg__Vector3__init(&encoder_msg);
 
   if (!initializeOdomMessage() || !initializeTFMessage()) {
     DBGLN("Failed to initialize messages");
@@ -455,6 +518,10 @@ bool createEntities() {
     DBGLN("Failed to add subscription to executor");
     return false;
   }
+
+  // Must happen before the first publishOdometry(), or /tf and /odom go out
+  // stamped with ESP32 uptime instead of ROS time.
+  rmw_uros_sync_session(1000);
 
   resetOdometry();
   last_cmd_time = millis();
@@ -489,10 +556,11 @@ void destroyEntities() {
     rclc_executor_fini(&executor);
   }
 
-  rcl_publisher_fini(&left_encoder_publisher, &node);
-  rcl_publisher_fini(&right_encoder_publisher, &node);
+  rcl_publisher_fini(&encoder_publisher, &node);
+#if PUBLISH_ODOM_FROM_ESP32
   rcl_publisher_fini(&odom_publisher, &node);
   rcl_publisher_fini(&tf_publisher, &node);
+#endif
 
   rcl_subscription_fini(&cmd_vel_subscriber, &node);
   rcl_node_fini(&node);
@@ -525,11 +593,11 @@ void publishEncoders() {
   long right_count = right_encoder_count;
   interrupts();
 
-  left_encoder_msg.data = (int32_t)left_count;
-  right_encoder_msg.data = (int32_t)right_count;
+  encoder_msg.x = (double)left_count;
+  encoder_msg.y = (double)right_count;
+  encoder_msg.z = 0.0;
 
-  trackPublish(rcl_publish(&left_encoder_publisher, &left_encoder_msg, NULL));
-  trackPublish(rcl_publish(&right_encoder_publisher, &right_encoder_msg, NULL));
+  trackPublish(rcl_publish(&encoder_publisher, &encoder_msg, NULL));
 }
 
 // ============================================================
@@ -586,7 +654,9 @@ void publishOdometry() {
   odom_msg.twist.twist.linear.x = linear_velocity;
   odom_msg.twist.twist.angular.z = angular_velocity;
 
+#if PUBLISH_ODOM_FROM_ESP32
   trackPublish(rcl_publish(&odom_publisher, &odom_msg, NULL));
+#endif
 
   // TF
   tf_transform.header.stamp.sec = odom_msg.header.stamp.sec;
@@ -601,7 +671,9 @@ void publishOdometry() {
   tf_transform.transform.rotation.z = sin(theta_position / 2.0);
   tf_transform.transform.rotation.w = cos(theta_position / 2.0);
 
+#if PUBLISH_ODOM_FROM_ESP32
   trackPublish(rcl_publish(&tf_publisher, &tf_msg, NULL));
+#endif
 }
 
 // ============================================================
@@ -643,7 +715,9 @@ void setup() {
   DBGLN("================================");
   DBGLN("Initializing Micro-ROS transport...");
 
-  set_microros_transports();
+  rmw_uros_set_custom_transport(true, NULL,
+                                nexva_transport_open, nexva_transport_close,
+                                nexva_transport_write, nexva_transport_read);
 
   delay(500);
 
@@ -661,6 +735,7 @@ void loop() {
   static unsigned long last_agent_check = 0;
   static unsigned long last_odom_publish = 0;
   static unsigned long disconnection_time = 0;
+  static unsigned long last_time_sync = 0;
 
   // Track state changes
   if (agent_state != previous_state) {
@@ -701,7 +776,11 @@ void loop() {
 
   // CONNECTED
   if (agent_state == AGENT_CONNECTED) {
-    RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(5)));
+    // Timeout MUST be 0. rcl_wait() documents 0 as a non-blocking poll, but
+    // any small non-zero value is not honoured through this rmw layer and
+    // falls through to a ~1 s block - measured at 995 ms for RCL_MS_TO_NS(5).
+    // That alone pinned the whole loop, and therefore /enco/counts, to 1 Hz.
+    RCSOFTCHECK(rclc_executor_spin_some(&executor, 0));
 
     if (millis() - last_cmd_time > CMD_TIMEOUT_MS) {
       stopMotors();
@@ -717,6 +796,11 @@ void loop() {
       agent_state = AGENT_DISCONNECTED;
       disconnection_time = millis();
       return;
+    }
+
+    if (millis() - last_time_sync >= TIME_SYNC_PERIOD_MS) {
+      last_time_sync = millis();
+      rmw_uros_sync_session(100);
     }
 
     if (millis() - last_agent_check >= AGENT_CHECK_PERIOD_MS) {
