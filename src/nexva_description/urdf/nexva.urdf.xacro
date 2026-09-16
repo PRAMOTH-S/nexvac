@@ -28,15 +28,18 @@
     <mass value="6.743767331968088"/>
     <inertia ixx="0.040343" iyy="0.056755" izz="0.029008" ixy="1.8e-05" iyz="1e-05" ixz="-0.0"/>
   </inertial>
+  <!-- The STLs were exported Y-up (base_link.stl measures 0.270 x 0.145 x
+       0.270, so its thin axis is Y). ROS is Z-up, so the mesh is rolled +90
+       deg about X here. The wheel joints already do this via their own rpy. -->
   <visual>
-    <origin xyz="0 0 0.07" rpy="0 0 0"/>
+    <origin xyz="0 0 0.07" rpy="1.5708 0 0"/>
     <geometry>
       <mesh filename="package://nexva_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="green"/>
   </visual>
   <collision>
-    <origin xyz="0 0 0.07" rpy="0 0 0"/>
+    <origin xyz="0 0 0.07" rpy="1.5708 0 0"/>
     <geometry>
       <mesh filename="package://nexva_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
@@ -50,14 +53,14 @@
     <inertia ixx="0.000197" iyy="0.000327" izz="0.000196" ixy="-0.0" iyz="0.0" ixz="-0.0"/>
   </inertial>
   <visual>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 -0.087" rpy="1.5708 0 0"/>
     <geometry>
       <mesh filename="package://nexva_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="blue"/>
   </visual>
   <collision>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 -0.087" rpy="1.5708 0 0"/>
     <geometry>
       <mesh filename="package://nexva_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
@@ -107,7 +110,11 @@
 </link>
 
 <joint name="lidar_joint" type="fixed">
-  <origin xyz="0 0 0.07" rpy="0 0 1.5708 "/>
+  <!-- 0.157 puts the scanner flush on the chassis top: the body reaches
+       z=0.1445 and lidar_1.stl carries a baked 0.087 m offset, so this is the
+       height the CAD assembly had it at. The laser frame must sit at the real
+       scanner centre, since that is where the scan originates. -->
+  <origin xyz="0 0 0.157" rpy="0 0 1.5708 "/>
   <parent link="base_link"/>
   <child link="laser"/>
 </joint>
