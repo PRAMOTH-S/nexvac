@@ -12,10 +12,12 @@
     <parent link="base_footprint"/>
     <child link="base_link"/>
 
-    <!-- base_footprint is base_link projected on the ground: same heading,
-         so this joint carries no rotation. Mounting yaw for the lidar belongs
-         in lidar_joint, not here. -->
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <!-- The meshes and wheel joints were authored with the robot driving along
+         an axis that is not +X (both wheels sit at x = +-0.12, so the axle
+         runs along X). ROS expects +X forward, so base_link is yawed here to
+         correct it: -90 deg squared the model up, plus a further 180 deg to
+         face it the right way round, giving +90 deg total. -->
+    <origin xyz="0 0 0" rpy="0 0 1.5708"/>
   </joint>
 
 
@@ -29,14 +31,14 @@
   <visual>
     <origin xyz="0 0 0.07" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="green"/>
   </visual>
   <collision>
     <origin xyz="0 0 0.07" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
     </geometry>
   </collision>
 </link>
@@ -50,14 +52,14 @@
   <visual>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/laser.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="blue"/>
   </visual>
   <collision>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/laser.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/lidar_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
   </collision>
 </link>
@@ -71,14 +73,14 @@
   <visual>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="black"/>
   </visual>
   <collision>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/left_wheel_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
   </collision>
 </link>
@@ -92,14 +94,14 @@
   <visual>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
     <material name="black"/>
   </visual>
   <collision>
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <geometry>
-      <mesh filename="file://$(find nexva_description)/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
+      <mesh filename="package://nexva_description/meshes/right_wheel_1.stl" scale="0.001 0.001 0.001"/>
     </geometry>
   </collision>
 </link>
@@ -111,14 +113,14 @@
 </joint>
 
 <joint name="left_wheel_joint" type="continuous">
-  <origin xyz="-0.12 0 0.0317" rpy="0 1.5708 1.5708"/>
+  <origin xyz="0.12 0 0.0317" rpy="0 1.5708 1.5708"/>
   <parent link="base_link"/>
   <child link="left_wheel_1"/>
   <axis xyz="0.0 -1.0 0.0"/>
 </joint>
 
 <joint name="right_wheel_joint" type="continuous">
-  <origin xyz="0.12 0 0.0317" rpy="0 1.5708 1.5708"/>
+  <origin xyz="-0.12 0 0.0317" rpy="0 1.5708 1.5708"/>
   <parent link="base_link"/>
   <child link="right_wheel_1"/>
   <axis xyz="0.0 -1.0 0.0"/>
