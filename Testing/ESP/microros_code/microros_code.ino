@@ -1,17 +1,4 @@
-/*
- * NEXVA ESP32 MICRO-ROS FIRMWARE - PRODUCTION VERSION
- * Enhanced reconnection handling with proper cleanup
- *
- * ROS 2 Topics:
- *   /cmd_vel (subscriber)
- *   /odom (publisher)
- *   /enco/left (publisher)
- *   /enco/right (publisher)
- *   /tf (publisher)
- *
- * Frames:
- *   odom -> base_footprint
- */
+
 
 #include <Arduino.h>
 #include <micro_ros_arduino.h>
@@ -62,6 +49,13 @@
 
 #define MAX_LINEAR_SPEED  0.30
 #define MAX_ANGULAR_SPEED 2.0
+
+// A straight velocity->PWM line stalls below ~150/255: measured breakaway is
+// between 110 (0.13 m/s cmd, robot doesn't move) and 170 (0.20 m/s cmd, it
+// does). Below MIN_PWM the motor hums under static friction but never turns,
+// so any small cmd_vel near a Nav2 goal never produces motion. Retune if the
+// motors/gearbox/load change.
+#define MIN_PWM 150
 
 // ============================================================
 // ROBOT PARAMETERS
@@ -342,6 +336,21 @@ void IRAM_ATTR rightEncoderISR() {
 // CMD_VEL CALLBACK
 // ============================================================
 
+// Maps a wheel velocity to PWM with a breakaway floor: any nonzero velocity
+// gets at least MIN_PWM instead of scaling linearly down to a value too weak
+// to overcome static friction. See MIN_PWM comment above.
+int velocityToPWM(double wheel_velocity) {
+  if (fabs(wheel_velocity) < 0.01) {
+    return 0;
+  }
+
+  double frac = fabs(wheel_velocity) / MAX_LINEAR_SPEED;
+  int pwm = MIN_PWM + (int)(frac * (MAX_PWM - MIN_PWM));
+  pwm = constrain(pwm, 0, MAX_PWM);
+
+  return (wheel_velocity > 0) ? pwm : -pwm;
+}
+
 void cmdVelCallback(const void *msgin) {
   const geometry_msgs__msg__Twist *msg =
       (const geometry_msgs__msg__Twist *)msgin;
@@ -352,11 +361,8 @@ void cmdVelCallback(const void *msgin) {
   double left_velocity = current_linear - (current_angular * WHEEL_BASE / 2.0);
   double right_velocity = current_linear + (current_angular * WHEEL_BASE / 2.0);
 
-  int left_pwm = (int)((left_velocity / MAX_LINEAR_SPEED) * 255.0);
-  int right_pwm = (int)((right_velocity / MAX_LINEAR_SPEED) * 255.0);
-
-  left_pwm = constrain(left_pwm, -255, 255);
-  right_pwm = constrain(right_pwm, -255, 255);
+  int left_pwm = velocityToPWM(left_velocity);
+  int right_pwm = velocityToPWM(right_velocity);
 
   setLeftMotor(left_pwm);
   setRightMotor(right_pwm);
