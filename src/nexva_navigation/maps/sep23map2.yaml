@@ -1,0 +1,7 @@
+image: sep23map2.pgm
+mode: trinary
+resolution: 0.050
+origin: [-3.512, -5.449, 0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
