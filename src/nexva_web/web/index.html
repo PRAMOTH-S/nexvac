@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexva Waypoints</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #d9dee5; --ink: #1a1f26;
+    --muted: #6b7684; --accent: #2563eb; --ok: #15803d; --warn: #b45309;
+    --bad: #b91c1c; --stop: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151a; --panel: #1b1f26; --line: #2c333d; --ink: #e8ecf1;
+      --muted: #97a1ae; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24;
+      --bad: #f87171; --stop: #ef4444;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151a; --panel: #1b1f26; --line: #2c333d; --ink: #e8ecf1;
+    --muted: #97a1ae; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24;
+    --bad: #f87171; --stop: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 16px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; margin-bottom: 12px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 13px;
+    padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .dot.warn { background: var(--warn); }
+  button {
+    font: inherit; padding: 9px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.stop {
+    background: var(--stop); border-color: var(--stop); color: #fff;
+    font-weight: 600; padding: 16px; width: 100%; font-size: 17px;
+  }
+  .wps { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .wp { text-align: left; }
+  .wp b { display: block; }
+  .wp small { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .wp.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 10px; }
+  .stat b { display: block; font-size: 19px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .log {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+    max-height: 150px; overflow-y: auto; color: var(--muted);
+  }
+  .log div { padding: 1px 0; }
+  .log .err { color: var(--bad); }
+  .log .good { color: var(--ok); }
+  .banner {
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px;
+    border: 1px solid var(--warn); color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+  }
+  .banner.bad { border-color: var(--bad); color: var(--bad);
+    background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  select { font: inherit; padding: 8px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  .joywrap { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .joy {
+    position: relative; width: 190px; height: 190px; flex: none;
+    border-radius: 50%; border: 1px solid var(--line);
+    background:
+      radial-gradient(circle, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 70%),
+      var(--bg);
+    touch-action: none; cursor: grab; user-select: none;
+  }
+  .joy::before, .joy::after {
+    content: ''; position: absolute; background: var(--line);
+  }
+  .joy::before { left: 50%; top: 8%; bottom: 8%; width: 1px; }
+  .joy::after { top: 50%; left: 8%; right: 8%; height: 1px; }
+  .joy.live { cursor: grabbing; border-color: var(--accent); }
+  .knob {
+    position: absolute; width: 62px; height: 62px; border-radius: 50%;
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: var(--accent); border: 2px solid var(--panel);
+    box-shadow: 0 2px 10px rgba(0,0,0,.3); pointer-events: none;
+  }
+  .joyread { flex: 1; min-width: 130px; }
+  .joyread .stat { margin-bottom: 8px; }
+  @media (max-width: 480px) {
+    .wps { grid-template-columns: 1fr 1fr; }
+    .joywrap { justify-content: center; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Nexva Waypoints</h1>
+  <div class="sub" id="sub">connecting…</div>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="pill"><i class="dot" id="d-link"></i><span id="t-link">link</span></span>
+      <span class="pill"><i class="dot" id="d-loc"></i><span id="t-loc">localization</span></span>
+      <span class="pill"><i class="dot" id="d-nav"></i><span id="t-nav">idle</span></span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="s-dist">–</b><span>metres to go</span></div>
+      <div class="stat"><b id="s-eta">–</b><span>eta (s)</span></div>
+      <div class="stat"><b id="s-rec">–</b><span>recoveries</span></div>
+      <div class="stat"><b id="s-pose">–</b><span>x, y, yaw</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Go to</h2>
+    <div class="wps" id="wps"></div>
+  </div>
+
+  <div class="card">
+    <h2>Set initial pose</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Only use this when the robot is <b>physically standing</b> at the chosen
+      waypoint. Seeding AMCL anywhere else makes every goal afterwards wrong.
+    </div>
+    <div class="row">
+      <select id="init-sel"></select>
+      <button id="init-btn">Seed AMCL here</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Tour</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Pick waypoints in order, then run them as one trip.
+    </div>
+    <div class="wps" id="tour-pick"></div>
+    <div class="row" style="margin-top:10px">
+      <span id="tour-list" class="sub" style="flex:1">nothing selected</span>
+      <button id="tour-clear">Clear</button>
+      <button id="tour-go" class="primary">Run tour</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Manual drive</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Hold and drag. Releasing stops the robot. Taking manual control cancels
+      any goal in progress.
+    </div>
+    <div class="joywrap">
+      <div class="joy" id="joy"><div class="knob" id="knob"></div></div>
+      <div class="joyread">
+        <div class="stat"><b id="j-vx">0.00</b><span>vx (m/s)</span></div>
+        <div class="stat"><b id="j-wz">0.00</b><span>wz (rad/s)</span></div>
+        <div class="sub" style="margin-top:8px">
+          Arrow keys / WASD also work while this page has focus.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="stop" id="stop">STOP</button>
+    <div class="sub" style="margin-top:8px;text-align:center">
+      Cancels the goal and zeroes the base. Not a substitute for a physical cutoff.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws, waypoints = [], state = {}, tour = [], reconnectDelay = 500;
+
+function log(msg, cls) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  $('log').prepend(d);
+  while ($('log').childElementCount > 80) $('log').lastChild.remove();
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { reconnectDelay = 500; setLink(true); log('connected', 'good'); };
+  ws.onclose = () => {
+    setLink(false);
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+  };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  else log('not connected', 'err');
+}
+
+function setLink(up) {
+  $('d-link').className = 'dot ' + (up ? 'ok' : 'bad');
+  $('t-link').textContent = up ? 'connected' : 'disconnected';
+  if (!up) { $('d-nav').className = 'dot'; $('t-nav').textContent = 'unknown'; }
+}
+
+function handle(m) {
+  switch (m.type) {
+    case 'waypoints':
+      waypoints = m.items;
+      $('sub').textContent = `${m.items.length} waypoints · map "${m.map}" · frame ${m.frame_id}`;
+      renderWaypoints();
+      break;
+    case 'state':
+      state = m;
+      renderState();
+      break;
+    case 'pose':
+      $('s-pose').textContent = `${m.x.toFixed(2)}, ${m.y.toFixed(2)}, ${m.yaw.toFixed(0)}°`;
+      break;
+    case 'feedback':
+      if (m.distance_remaining !== undefined) {
+        $('s-dist').textContent = m.distance_remaining.toFixed(2);
+        $('s-eta').textContent = m.eta.toFixed(0);
+        $('s-rec').textContent = m.recoveries;
+        if (m.recoveries > 0) $('s-rec').style.color = 'var(--warn)';
+      } else {
+        $('t-nav').textContent = `waypoint ${m.waypoint_index + 1}/${m.total}: ${m.waypoint_name}`;
+      }
+      break;
+    case 'result':
+      log(`${m.destination || 'robot'}: ${m.status} ${m.detail || ''}`,
+          m.status === 'SUCCEEDED' ? 'good' : 'err');
+      $('s-dist').textContent = '–'; $('s-eta').textContent = '–';
+      $('s-rec').textContent = '–'; $('s-rec').style.color = '';
+      break;
+    case 'initial_pose':
+      log(`initial pose set at "${m.waypoint}" — ${m.localized ? 'AMCL converged' : 'NOT converged yet'}`,
+          m.localized ? 'good' : 'err');
+      break;
+    case 'map_check':
+      log('map check: ' + (m.ok ? 'OK' : m.detail), m.ok ? 'good' : 'err');
+      break;
+    case 'ack':  log(m.cmd + ' acknowledged'); break;
+    case 'error': log(m.msg, 'err'); break;
+  }
+}
+
+function renderState() {
+  $('d-loc').className = 'dot ' + (state.localized ? 'ok' : 'bad');
+  $('t-loc').textContent = state.localized ? 'localized' : 'not localized';
+  $('d-nav').className = 'dot ' + (state.navigating ? 'warn' : 'ok');
+  $('t-nav').textContent = state.navigating ? ('→ ' + state.destination) : 'idle';
+
+  const b = $('banner');
+  if (state.map_ok === false) {
+    b.hidden = false; b.className = 'banner bad';
+    b.textContent = `Loaded map does not match this waypoint file (expects "${state.map}"). Movement is blocked.`;
+  } else if (!state.nav_ready) {
+    b.hidden = false; b.className = 'banner';
+    b.textContent = 'Nav2 navigate_to_pose is not available — is the navigation stack running?';
+  } else if (!state.localized) {
+    b.hidden = false; b.className = 'banner';
+    b.textContent = 'Robot is not localized. Set the initial pose before sending a goal.';
+  } else { b.hidden = true; }
+
+  const blocked = !state.localized || state.map_ok === false || !state.nav_ready;
+  document.querySelectorAll('.wp[data-go]').forEach(el => {
+    el.disabled = blocked;
+    el.classList.toggle('active', state.navigating && state.destination === el.dataset.go);
+  });
+  $('tour-go').disabled = blocked || tour.length === 0;
+}
+
+function renderWaypoints() {
+  const go = $('wps'), pick = $('tour-pick'), sel = $('init-sel');
+  go.innerHTML = ''; pick.innerHTML = ''; sel.innerHTML = '';
+  for (const w of waypoints) {
+    const b = document.createElement('button');
+    b.className = 'wp'; b.dataset.go = w.name;
+    b.innerHTML = `<b></b><small></small>`;
+    b.querySelector('b').textContent = w.name;
+    b.querySelector('small').textContent = `${w.x.toFixed(2)}, ${w.y.toFixed(2)}`;
+    b.onclick = () => { log('goto ' + w.name); send({cmd: 'goto', waypoint: w.name}); };
+    go.appendChild(b);
+
+    const t = document.createElement('button');
+    t.className = 'wp'; t.textContent = w.name;
+    t.onclick = () => { tour.push(w.name); renderTour(); };
+    pick.appendChild(t);
+
+    const o = document.createElement('option');
+    o.value = o.textContent = w.name;
+    sel.appendChild(o);
+  }
+  renderState();
+}
+
+function renderTour() {
+  $('tour-list').textContent = tour.length ? tour.join('  →  ') : 'nothing selected';
+  $('tour-go').disabled = tour.length === 0 || !state.localized;
+}
+
+$('tour-clear').onclick = () => { tour = []; renderTour(); };
+$('tour-go').onclick = () => {
+  log('tour: ' + tour.join(' → '));
+  send({cmd: 'tour', waypoints: tour});
+};
+$('init-btn').onclick = () => {
+  const name = $('init-sel').value;
+  if (!confirm(`Is the robot PHYSICALLY standing at "${name}" right now?\n\n` +
+               `If not, cancel — seeding AMCL in the wrong place makes every ` +
+               `goal afterwards wrong.`)) return;
+  send({cmd: 'set_initial_pose', waypoint: name, confirmed: true});
+};
+$('stop').onclick = () => { log('STOP', 'err'); send({cmd: 'estop'}); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { log('STOP (Esc)', 'err'); send({cmd: 'estop'}); }
+});
+
+/* ---- manual drive -------------------------------------------------------
+   The node publishes /cmd_vel on its own fixed-rate timer, so this only has
+   to keep the latest command fresh. It is sent at 10 Hz rather than on every
+   pointer event: the firmware's micro-ROS link resets the board if /cmd_vel
+   is driven much faster, and pointermove can fire well above 100 Hz.        */
+const VX_MAX = 0.26, WZ_MAX = 1.5, SEND_HZ = 10;
+const joy = $('joy'), knob = $('knob');
+let driving = false, vx = 0, wz = 0, sendTimer = null, keys = new Set();
+
+function setKnob(dx, dy) {
+  knob.style.left = `calc(50% + ${dx}px)`;
+  knob.style.top  = `calc(50% + ${dy}px)`;
+}
+
+function setVel(nvx, nwz) {
+  vx = nvx; wz = nwz;
+  $('j-vx').textContent = vx.toFixed(2);
+  $('j-wz').textContent = wz.toFixed(2);
+}
+
+function startSending() {
+  if (sendTimer) return;
+  joy.classList.add('live');
+  sendTimer = setInterval(() => send({cmd: 'teleop', vx, wz}), 1000 / SEND_HZ);
+}
+
+function stopSending() {
+  if (sendTimer) { clearInterval(sendTimer); sendTimer = null; }
+  joy.classList.remove('live');
+  setVel(0, 0);
+  setKnob(0, 0);
+  send({cmd: 'teleop_stop'});
+}
+
+function fromPointer(ev) {
+  const r = joy.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  const lim = r.width / 2 - 28;
+  let dx = ev.clientX - cx, dy = ev.clientY - cy;
+  const d = Math.hypot(dx, dy);
+  if (d > lim) { dx *= lim / d; dy *= lim / d; }
+  setKnob(dx, dy);
+  // up on screen = forward; right = clockwise, which is negative wz in ROS
+  setVel(-(dy / lim) * VX_MAX, -(dx / lim) * WZ_MAX);
+}
+
+joy.addEventListener('pointerdown', e => {
+  driving = true;
+  joy.setPointerCapture(e.pointerId);
+  fromPointer(e);
+  startSending();
+});
+joy.addEventListener('pointermove', e => { if (driving) fromPointer(e); });
+for (const evt of ['pointerup', 'pointercancel', 'pointerleave']) {
+  joy.addEventListener(evt, () => { if (driving) { driving = false; stopSending(); } });
+}
+
+const KEYMAP = {
+  ArrowUp: [1, 0], w: [1, 0], ArrowDown: [-1, 0], s: [-1, 0],
+  ArrowLeft: [0, 1], a: [0, 1], ArrowRight: [0, -1], d: [0, -1],
+};
+function applyKeys() {
+  let f = 0, t = 0;
+  for (const k of keys) { f += KEYMAP[k][0]; t += KEYMAP[k][1]; }
+  if (!keys.size) { stopSending(); return; }
+  setVel(Math.max(-1, Math.min(1, f)) * VX_MAX,
+         Math.max(-1, Math.min(1, t)) * WZ_MAX);
+  setKnob(-(wz / WZ_MAX) * 60, -(vx / VX_MAX) * 60);
+  startSending();
+}
+document.addEventListener('keydown', e => {
+  if (e.repeat || !(e.key in KEYMAP)) return;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+  e.preventDefault(); keys.add(e.key); applyKeys();
+});
+document.addEventListener('keyup', e => {
+  if (keys.delete(e.key)) applyKeys();
+});
+// Losing focus mid-drive must not leave the robot running.
+window.addEventListener('blur', () => { keys.clear(); driving = false; stopSending(); });
+
+connect();
+</script>
+</body>
+</html>

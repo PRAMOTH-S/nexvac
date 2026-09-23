@@ -1,0 +1,73 @@
+# Named waypoints for the Nexva robot.
+#
+# `map` is not decorative: sep23map1 and sep23map2 have different origins, so
+# the same x/y is a different physical place in each. The bridge refuses to
+# move if the loaded map does not match this name.
+#
+# To add a waypoint: drive the robot there, then read its pose with
+#   ros2 topic echo /amcl_pose --once
+# and copy position + orientation below.
+
+map: sep23map2
+frame_id: map
+
+waypoints:
+  - name: Home
+    pose:
+      position:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+
+  - name: 3D Printing
+    pose:
+      position:
+        x: 3.078465821856865
+        y: -0.7963715596094696
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.14804940227483274
+        w: 0.9889799666757991
+
+  - name: Main Door
+    pose:
+      position:
+        x: 4.520732938139482
+        y: 2.0013645041997288
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: -0.029195868690711373
+        w: 0.999573709764014
+
+  - name: Working area
+    pose:
+      position:
+        x: 1.9239182202722158
+        y: 0.5882521307857205
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.895374466813854
+        w: -0.4453140062672704
+
+  - name: Docking
+    pose:
+      position:
+        x: -0.7910340585863703
+        y: -1.9016829400662014
+        z: 0.0
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.9258371590713838
+        w: -0.37792268373654064
