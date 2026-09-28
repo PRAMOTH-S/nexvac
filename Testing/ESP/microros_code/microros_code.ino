@@ -45,17 +45,40 @@
 
 #define PWM_FREQ       1000
 #define PWM_RESOLUTION 8
+// Full authority for the controller. The speed limit is NOT set here any more
+// - see MAX_LINEAR_SPEED. Capping PWM to limit speed is what made the robot
+// unusable on 28 Sep: PWM is a duty cycle, and how much speed a given duty
+// cycle buys depends on the battery.
 #define MAX_PWM 255
 
+// The real speed limits, enforced on the velocity TARGET. Because the loop
+// below closes on measured wheel speed, these are honoured whatever the pack
+// voltage is doing.
 #define MAX_LINEAR_SPEED  0.30
 #define MAX_ANGULAR_SPEED 2.0
 
-// A straight velocity->PWM line stalls below ~150/255: measured breakaway is
-// between 110 (0.13 m/s cmd, robot doesn't move) and 170 (0.20 m/s cmd, it
-// does). Below MIN_PWM the motor hums under static friction but never turns,
-// so any small cmd_vel near a Nav2 goal never produces motion. Retune if the
-// motors/gearbox/load change.
-#define MIN_PWM 150
+// ---------- closed-loop wheel velocity control ----------
+//
+// Open loop was the root cause of every speed problem this robot has had. The
+// PWM->speed curve moved between 23 Sep (0.00341 * (PWM-147)) and 28 Sep
+// (0.0065 * (PWM-108)) with no code change at all - battery state of charge.
+// A PI loop on measured wheel speed makes that irrelevant.
+//
+// Feedforward gets the wheel moving immediately; the integrator absorbs
+// whatever the feedforward got wrong, including pack voltage drift.
+#define CONTROL_HZ        50.0
+#define FF_BREAKAWAY      86.0   // PWM at which the wheels start turning
+#define FF_SLOPE         0.0098  // m/s gained per PWM count above breakaway
+#define PID_I_MAX        110.0   // anti-windup clamp, in PWM counts
+#define VEL_DEADBAND      0.005  // below this target, hold the wheel stopped
+#define VEL_FILTER_ALPHA  0.35   // low-pass on measured wheel speed
+
+// Starting gains, in PWM counts per (m/s) and per (m/s x s). Retunable at
+// runtime by publishing to /pid_gains (x=Kp, y=Ki, z=feedforward breakaway),
+// so tuning does not need a reflash.
+double pid_kp = 45.0;
+double pid_ki = 500.0;
+double ff_breakaway = FF_BREAKAWAY;
 
 // ============================================================
 // ROBOT PARAMETERS
@@ -163,7 +186,10 @@ extern "C" size_t nexva_transport_read(struct uxrCustomTransport *t,
 
 rcl_node_t node;
 rcl_subscription_t cmd_vel_subscriber;
+rcl_subscription_t gains_subscriber;
 rcl_publisher_t encoder_publisher;
+rcl_publisher_t pwm_publisher;
+rcl_publisher_t wheelvel_publisher;
 rcl_publisher_t odom_publisher;
 rcl_publisher_t tf_publisher;
 
@@ -172,7 +198,10 @@ rclc_support_t support;
 rcl_allocator_t allocator;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
+geometry_msgs__msg__Vector3 gains_msg;
 geometry_msgs__msg__Vector3 encoder_msg;
+geometry_msgs__msg__Vector3 pwm_msg;
+geometry_msgs__msg__Vector3 wheelvel_msg;
 nav_msgs__msg__Odometry odom_msg;
 tf2_msgs__msg__TFMessage tf_msg;
 geometry_msgs__msg__TransformStamped tf_transform;
@@ -219,6 +248,22 @@ unsigned long last_odom_time = 0;
 unsigned long last_cmd_time = 0;
 float current_linear = 0.0;
 float current_angular = 0.0;
+
+// Velocity targets the control loop chases, in m/s at the wheel.
+double target_left_velocity = 0.0;
+double target_right_velocity = 0.0;
+
+// Measured (filtered) wheel velocities and the loop's integral state.
+double measured_left_velocity = 0.0;
+double measured_right_velocity = 0.0;
+double integral_left = 0.0;
+double integral_right = 0.0;
+int applied_left_pwm = 0;
+int applied_right_pwm = 0;
+
+long prev_control_left = 0;
+long prev_control_right = 0;
+unsigned long last_control_us = 0;
 
 // ============================================================
 // FLAGS
@@ -308,6 +353,15 @@ void stopMotors() {
   setRightMotor(0);
   current_linear = 0.0;
   current_angular = 0.0;
+  // Clear the loop too. Leaving the targets or the integral set would have the
+  // controller fight the stop and lurch the moment it is allowed to run again.
+  target_left_velocity = 0.0;
+  target_right_velocity = 0.0;
+  integral_left = 0.0;
+  integral_right = 0.0;
+  applied_left_pwm = 0;
+  applied_right_pwm = 0;
+  last_control_us = 0;   // re-seed dt rather than carry the idle gap forward
 }
 
 // ============================================================
@@ -336,21 +390,9 @@ void IRAM_ATTR rightEncoderISR() {
 // CMD_VEL CALLBACK
 // ============================================================
 
-// Maps a wheel velocity to PWM with a breakaway floor: any nonzero velocity
-// gets at least MIN_PWM instead of scaling linearly down to a value too weak
-// to overcome static friction. See MIN_PWM comment above.
-int velocityToPWM(double wheel_velocity) {
-  if (fabs(wheel_velocity) < 0.01) {
-    return 0;
-  }
-
-  double frac = fabs(wheel_velocity) / MAX_LINEAR_SPEED;
-  int pwm = MIN_PWM + (int)(frac * (MAX_PWM - MIN_PWM));
-  pwm = constrain(pwm, 0, MAX_PWM);
-
-  return (wheel_velocity > 0) ? pwm : -pwm;
-}
-
+// cmd_vel now only sets velocity TARGETS. Nothing here touches PWM - that is
+// the control loop's job, once it can compare the target against what the
+// wheels are actually doing.
 void cmdVelCallback(const void *msgin) {
   const geometry_msgs__msg__Twist *msg =
       (const geometry_msgs__msg__Twist *)msgin;
@@ -361,13 +403,113 @@ void cmdVelCallback(const void *msgin) {
   double left_velocity = current_linear - (current_angular * WHEEL_BASE / 2.0);
   double right_velocity = current_linear + (current_angular * WHEEL_BASE / 2.0);
 
-  int left_pwm = velocityToPWM(left_velocity);
-  int right_pwm = velocityToPWM(right_velocity);
+  // A turn can push one wheel past the limit. Scale both together so the
+  // commanded turning ratio survives, instead of clipping one wheel and
+  // silently straightening the curve.
+  double peak = max(fabs(left_velocity), fabs(right_velocity));
+  if (peak > MAX_LINEAR_SPEED) {
+    double scale = MAX_LINEAR_SPEED / peak;
+    left_velocity *= scale;
+    right_velocity *= scale;
+  }
 
-  setLeftMotor(left_pwm);
-  setRightMotor(right_pwm);
+  target_left_velocity = left_velocity;
+  target_right_velocity = right_velocity;
 
   last_cmd_time = millis();
+}
+
+// Live gain tuning: publish geometry_msgs/Vector3 to /pid_gains with
+// x = Kp, y = Ki, z = feedforward breakaway PWM. Zero or negative leaves that
+// term alone, so any one of the three can be adjusted on its own.
+void gainsCallback(const void *msgin) {
+  const geometry_msgs__msg__Vector3 *msg =
+      (const geometry_msgs__msg__Vector3 *)msgin;
+  if (msg->x > 0.0) pid_kp = msg->x;
+  if (msg->y >= 0.0) pid_ki = msg->y;
+  if (msg->z > 0.0) ff_breakaway = msg->z;
+  integral_left = 0.0;
+  integral_right = 0.0;
+}
+
+// ============================================================
+// WHEEL VELOCITY CONTROL LOOP
+// ============================================================
+
+static inline double countsToMetres(long counts) {
+  return ((double)counts / ENCODER_CPR) * (2.0 * PI * WHEEL_RADIUS);
+}
+
+// One wheel's PI + feedforward step. Returns the PWM to apply.
+static int wheelControl(double target, double measured, double *integral,
+                        double dt) {
+  if (fabs(target) < VEL_DEADBAND) {
+    *integral = 0.0;
+    return 0;
+  }
+
+  double error = target - measured;
+  double sign = (target > 0.0) ? 1.0 : -1.0;
+
+  // Feedforward: the duty cycle this speed needed last time we measured the
+  // motors. Only ever an estimate - the integrator carries the rest.
+  double ff = sign * (ff_breakaway + fabs(target) / FF_SLOPE);
+
+  double candidate = ff + pid_kp * error + pid_ki * (*integral);
+
+  // Integrate only while we have authority left, so a saturated output does
+  // not keep winding the integral up and overshoot on the way back down.
+  if (candidate > -MAX_PWM && candidate < MAX_PWM) {
+    *integral += error * dt;
+    *integral = constrain(*integral, -PID_I_MAX / max(pid_ki, 1.0),
+                                      PID_I_MAX / max(pid_ki, 1.0));
+    candidate = ff + pid_kp * error + pid_ki * (*integral);
+  }
+
+  return (int)constrain(candidate, -(double)MAX_PWM, (double)MAX_PWM);
+}
+
+void controlLoop() {
+  unsigned long now = micros();
+  if (last_control_us == 0) {
+    last_control_us = now;
+    return;
+  }
+  double dt = (now - last_control_us) / 1000000.0;
+  if (dt < 1.0 / CONTROL_HZ) {
+    return;
+  }
+  last_control_us = now;
+
+  // The loop does not run while the base is stopped, so the first tick after
+  // driving resumes sees dt equal to the whole idle period. Integrating that
+  // in one step drove the integral straight to its clamp and produced a
+  // full-power kick - measured at PWM 246 for a 0.15 m/s request. Cap dt so a
+  // gap can only ever contribute one normal step.
+  if (dt > 2.0 / CONTROL_HZ) {
+    dt = 2.0 / CONTROL_HZ;
+  }
+
+  noInterrupts();
+  long l = left_encoder_count;
+  long r = right_encoder_count;
+  interrupts();
+
+  double raw_left = countsToMetres(l - prev_control_left) / dt;
+  double raw_right = countsToMetres(r - prev_control_right) / dt;
+  prev_control_left = l;
+  prev_control_right = r;
+
+  measured_left_velocity += VEL_FILTER_ALPHA * (raw_left - measured_left_velocity);
+  measured_right_velocity += VEL_FILTER_ALPHA * (raw_right - measured_right_velocity);
+
+  applied_left_pwm = wheelControl(target_left_velocity, measured_left_velocity,
+                                  &integral_left, dt);
+  applied_right_pwm = wheelControl(target_right_velocity, measured_right_velocity,
+                                   &integral_right, dt);
+
+  setLeftMotor(applied_left_pwm);
+  setRightMotor(applied_right_pwm);
 }
 
 // ============================================================
@@ -490,6 +632,31 @@ bool createEntities() {
     return false;
   }
 
+  // Observability for the control loop. BEST_EFFORT: these are debug streams,
+  // a dropped sample is fine and must never block the reliable odom stream.
+  // /motor_pwm  x = left PWM,            y = right PWM
+  // /wheel_vel  x = left measured m/s,   y = right measured m/s
+  if (rclc_publisher_init_best_effort(&pwm_publisher, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+          "/motor_pwm") != RCL_RET_OK) {
+    DBGLN("Failed to create PWM publisher");
+    return false;
+  }
+
+  if (rclc_publisher_init_best_effort(&wheelvel_publisher, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+          "/wheel_vel") != RCL_RET_OK) {
+    DBGLN("Failed to create wheel velocity publisher");
+    return false;
+  }
+
+  if (rclc_subscription_init_default(&gains_subscriber, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+          "/pid_gains") != RCL_RET_OK) {
+    DBGLN("Failed to create gains subscriber");
+    return false;
+  }
+
 #if PUBLISH_ODOM_FROM_ESP32
   if (rclc_publisher_init_default(&odom_publisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
@@ -508,13 +675,16 @@ bool createEntities() {
 
   geometry_msgs__msg__Twist__init(&cmd_vel_msg);
   geometry_msgs__msg__Vector3__init(&encoder_msg);
+  geometry_msgs__msg__Vector3__init(&pwm_msg);
+  geometry_msgs__msg__Vector3__init(&wheelvel_msg);
+  geometry_msgs__msg__Vector3__init(&gains_msg);
 
   if (!initializeOdomMessage() || !initializeTFMessage()) {
     DBGLN("Failed to initialize messages");
     return false;
   }
 
-  if (rclc_executor_init(&executor, &support.context, 1, &allocator) != RCL_RET_OK) {
+  if (rclc_executor_init(&executor, &support.context, 2, &allocator) != RCL_RET_OK) {
     DBGLN("Failed to init executor");
     return false;
   }
@@ -522,6 +692,12 @@ bool createEntities() {
   if (rclc_executor_add_subscription(&executor, &cmd_vel_subscriber,
           &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA) != RCL_RET_OK) {
     DBGLN("Failed to add subscription to executor");
+    return false;
+  }
+
+  if (rclc_executor_add_subscription(&executor, &gains_subscriber,
+          &gains_msg, &gainsCallback, ON_NEW_DATA) != RCL_RET_OK) {
+    DBGLN("Failed to add gains subscription to executor");
     return false;
   }
 
@@ -563,12 +739,15 @@ void destroyEntities() {
   }
 
   rcl_publisher_fini(&encoder_publisher, &node);
+  rcl_publisher_fini(&pwm_publisher, &node);
+  rcl_publisher_fini(&wheelvel_publisher, &node);
 #if PUBLISH_ODOM_FROM_ESP32
   rcl_publisher_fini(&odom_publisher, &node);
   rcl_publisher_fini(&tf_publisher, &node);
 #endif
 
   rcl_subscription_fini(&cmd_vel_subscriber, &node);
+  rcl_subscription_fini(&gains_subscriber, &node);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
 
@@ -604,6 +783,16 @@ void publishEncoders() {
   encoder_msg.z = 0.0;
 
   trackPublish(rcl_publish(&encoder_publisher, &encoder_msg, NULL));
+
+  pwm_msg.x = (double)applied_left_pwm;
+  pwm_msg.y = (double)applied_right_pwm;
+  pwm_msg.z = 0.0;
+  rcl_publish(&pwm_publisher, &pwm_msg, NULL);
+
+  wheelvel_msg.x = measured_left_velocity;
+  wheelvel_msg.y = measured_right_velocity;
+  wheelvel_msg.z = 0.0;
+  rcl_publish(&wheelvel_publisher, &wheelvel_msg, NULL);
 }
 
 // ============================================================
@@ -790,6 +979,9 @@ void loop() {
 
     if (millis() - last_cmd_time > CMD_TIMEOUT_MS) {
       stopMotors();
+    } else {
+      // Self-gated to CONTROL_HZ; the surrounding loop runs far faster.
+      controlLoop();
     }
 
     if (millis() - last_odom_publish >= ODOM_PERIOD_MS) {
