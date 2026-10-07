@@ -22,6 +22,60 @@ Open/broken: <anything left half-done, known-bad, or to verify next session>
 
 ---
 
+## 2026-10-06/07 — Obstacle reaction audit; explorer live obstacles; push.sh history (Pramoth)
+
+Commit(s): uncommitted (nothing pushed to the Pi at time of writing - no SSH key on the laptop)
+Changed: `nav2_params.yaml`, `frontier_explorer.py`, `mode_manager.py`, `launch/realbot/robot_*.sh`,
+`nexva_web` (speed/wheels/UI), `push.sh`, `tools/merge_update_md.py`.
+
+**Why the robot decided late — from the code, not yet measured on hardware.**
+Sensor-to-command latency is small: lidar 10 Hz (≤100 ms), odom/TF 20 Hz, local costmap 5 Hz
+(≤200 ms), MPPI 20 Hz (≤50 ms) → ≈0.35 s worst case, ≈10 cm at 0.28 m/s. Not seconds. The
+seconds came from *what the deciders were told*:
+
+- **Nav2 / MPPI:** `robot_radius 0.22`, `inflation_radius 0.25`, `cost_scaling_factor 2.0` = one
+  5 cm ring of cost (≈237) then zero. CostCritic is binary until ~3 cm from contact; when every
+  sampled trajectory collides they all score the same and the average keeps going. Global inflation
+  0.30 put the path 0.22–0.30 m from walls and PathAlignCritic (weight 14) pulled the robot back
+  onto it. Fix: 0.55 / 4.0 both costmaps (cost ≈183 at 0.30 m, 123 at 0.40 m, 67 at 0.55 m).
+- **Explorer (explore/clean):** plans on SLAM `/map` only. slam_toolbox `map_update_interval 5.0`
+  + `replan_period 2.5` = a sudden obstacle invisible to the planner for up to ~7.5 s while
+  `follow_path` stops at `stop_distance`, spins to the open side, then aims back at the old path.
+  Fix: `live_obstacles()` stamps scan returns ≤`live_obstacle_range` (1.0 m) into the planning
+  grid each replan; `forward ≤ slow_distance` triggers `request_replan()` at most every
+  `blocked_replan_period` (1.0 s). Mask is rebuilt per replan, never written to the map; stale
+  scan → empty mask.
+
+**Footprint (added later on 2026-10-07):** Nav2 had `robot_radius 0.22` - a 44 cm circle for a
+30 x 30 cm body (circumradius 0.212, inscribed 0.15). Replaced by the square polygon + 1 cm
+padding on both costmaps, with MPPI `CostCritic.consider_footprint: true` (centre-only checking
+compares against the inscribed 0.15 m and would let the corners clip a wall while rotating).
+Verified only that `nav2_costmap_2d` loads and configures with it (isolated domain); the
+standalone node segfaulted on SIGINT from the configured-not-active state, which is a shutdown
+path, not the parameters. Explorer `angular_speed` 0.5 -> 0.8 rad/s in explore/clean yaml:
+per-tick rotation 0.08 rad < `aim_tolerance` 0.15, half-turn 3.9 s < `aim_timeout` 7 s.
+
+**Rejected / deferred:**
+- *IMU for obstacle avoidance:* it cannot see obstacles; BNO055 is accel-only (I2C failures,
+  uncalibrated) and EKF fusion previously measured 109° vs 12° mean heading error. Not touched.
+- *Raising the lidar:* scan plane is ≈0.18–0.19 m (laser frame z 0.157 + emitter offset), above
+  the 0.145 m chassis; raising it widens the blind zone for low obstacles. The brief's "10 mm above
+  ground" is 10 mm above the chassis top.
+- *Collision Monitor as a universal Layer 1:* only in the loop in navigate mode; explorer,
+  zone_coverage and teleop publish `/cmd_vel` directly. Moving it into bringup with a
+  `/cmd_vel_raw` remap + a `stop` polygon is the right design, not done yet.
+- *Active brake:* firmware coasts on zero target (both IN pins LOW, `.ino:74`). Short-brake would
+  cut stopping distance; needs a measured coast-down distance and a wheels-up bench test first.
+
+**Sim A/B (Gazebo, OLD vs NEW Nav2 params):** six runs were recorded but the scratch directory
+was lost on a session restart before analysis. No sim numbers exist; do not quote any.
+
+Open/broken: nothing verified on the robot. To measure: `ros2 topic hz /scan /odom /cmd_vel`,
+`ros2 topic delay /scan` (on the Pi), controller "missed its desired rate" warnings, and a
+coast-down distance at 0.28 m/s. Watch in clean mode for targets skipped while a person stands on them.
+
+---
+
 ## 2026-10-05 — Docs/WIRING.md, and circuit.txt found to contradict the firmware
 
 Commit(s): uncommitted

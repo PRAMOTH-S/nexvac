@@ -358,6 +358,17 @@ class FrontierExplorer(Node):
         self.declare_parameter('lookahead', 0.25)
         self.declare_parameter('min_frontier_size', 10)
         self.declare_parameter('replan_period', 2.5)
+        # SUDDEN OBSTACLES. The planner reads only the SLAM /map, which
+        # slam_toolbox republishes every map_update_interval (5 s here), so a
+        # box or a person that appears in front of the robot was invisible to
+        # the path for up to ~7.5 s (5 s map + 2.5 s replan). The robot
+        # stopped, turned away, then swung back at the old path through the
+        # obstacle. Live lidar returns within this range are now stamped into
+        # the planning grid, and a closing obstacle ahead triggers a replan at
+        # most every `blocked_replan_period` instead of waiting for the timer.
+        # 0 disables both (the old behaviour).
+        self.declare_parameter('live_obstacle_range', 1.0)
+        self.declare_parameter('blocked_replan_period', 1.0)
 
         # A frontier goal has to be far enough away to be worth driving to.
         # Standing on a frontier yields a zero-length path, and with a 360 deg
@@ -470,6 +481,11 @@ class FrontierExplorer(Node):
         self.angular_speed = self.get_parameter('angular_speed').value
         self.goal_tolerance = self.get_parameter('goal_tolerance').value
         self.lookahead = self.get_parameter('lookahead').value
+        self.live_obstacle_range = float(
+            self.get_parameter('live_obstacle_range').value)
+        self.blocked_replan_period = float(
+            self.get_parameter('blocked_replan_period').value)
+        self.blocked_replan_at = 0.0
         self.min_frontier_size = self.get_parameter('min_frontier_size').value
         self.replan_period = self.get_parameter('replan_period').value
         self.min_goal_distance = self.get_parameter('min_goal_distance').value
@@ -2675,6 +2691,8 @@ class FrontierExplorer(Node):
         free = (grid >= 0) & (grid <= FREE_MAX)
         occupied = grid >= OCCUPIED_MIN
         unknown = grid == UNKNOWN
+        # What the lidar sees now, not what SLAM drew up to 5 s ago.
+        occupied |= self.live_obstacles(msg, pose, h, w)
 
         # Inflate by the driving half-width, not the turning circle: the wider
         # figure would fence off a whole robot-radius strip along every wall
@@ -2777,6 +2795,36 @@ class FrontierExplorer(Node):
                         return r * w + c
 
         return None
+
+    def live_obstacles(self, msg, pose, h, w):
+        """
+        Grid cells the lidar sees occupied right now, as a boolean mask.
+
+        Only returns within `live_obstacle_range` of the robot: that is where
+        a stale map costs a decision, and a short range keeps a person walking
+        past at the far side of the room from re-routing everything. The mask
+        is rebuilt from the current scan on every replan, so it forgets an
+        obstacle as soon as it moves - nothing is written into the map.
+        """
+        mask = np.zeros((h, w), dtype=bool)
+
+        if self.live_obstacle_range <= 0.0 or self.scan_is_stale():
+            return mask
+
+        px, py, yaw = pose[0], pose[1], pose[2]
+        c, s = math.cos(yaw), math.sin(yaw)
+
+        for x, y, distance in self.scan_points:
+            if distance > self.live_obstacle_range:
+                continue
+
+            row, col = self.world_to_cell(msg, px + c * x - s * y,
+                                          py + s * x + c * y)
+
+            if 0 <= row < h and 0 <= col < w:
+                mask[row, col] = True
+
+        return mask
 
     def request_replan(self):
         """Replan as soon as the current callback returns, not inside it."""
@@ -4057,6 +4105,14 @@ class FrontierExplorer(Node):
         error = math.atan2(math.sin(heading - yaw), math.cos(heading - yaw))
 
         forward = self.forward_clearance()
+
+        # Something is closing in the drive corridor: re-route around it now,
+        # with it in the grid, rather than at the next timed replan.
+        if (forward <= self.slow_distance and self.live_obstacle_range > 0.0
+                and time.monotonic() - self.blocked_replan_at
+                >= self.blocked_replan_period):
+            self.blocked_replan_at = time.monotonic()
+            self.request_replan()
 
         if forward <= self.stop_distance:
             # Something is inside the drive corridor. Turn towards whichever

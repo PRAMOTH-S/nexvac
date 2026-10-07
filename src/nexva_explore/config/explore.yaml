@@ -26,7 +26,10 @@
     slow_distance: 0.45
 
     linear_speed: 0.15
-    angular_speed: 0.5
+    # 0.8 rad/s (was 0.5): a 90 deg turn away from an obstacle in 2 s, not
+    # 3.1 s. Per-tick rotation 0.08 rad stays under aim_tolerance 0.15, and a
+    # half-turn (3.9 s) under aim_timeout 7 s. Lower it again if turns overshoot.
+    angular_speed: 0.8
 
     # The BNO055 is now started by bringup (nexva_sensor/imu.launch.py,
     # enable defaults true), so the gyro-backed stall test can run and is
