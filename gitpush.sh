@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Commit everything in this workspace and push it to GitHub in one go.
 #
-#   ./gitpush.sh                      commit with an automatic message, push
-#   ./gitpush.sh "fixed PID gains"    commit with this message, push
+#   ./gitpush.sh                      list changes, ask what you changed, commit, push
+#   ./gitpush.sh "fixed PID gains"    commit with this message (no question), push
 #   ./gitpush.sh --dry                show what would be committed, push nothing
 #
 # This is NOT push.sh. push.sh sends source to the Pi; this sends it to
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-REMOTE_URL="${GIT_REMOTE_URL:-https://github.com/PRAMOTH-S/nexva_ws.git}"
+REMOTE_URL="${GIT_REMOTE_URL:-https://github.com/PRAMOTH-S/nexvac.git}"
 BRANCH="${GIT_BRANCH:-main}"
 cd "$(dirname "$(readlink -f "$0")")"
 
@@ -60,6 +60,10 @@ else
         git reset -q
         echo "(--dry: nothing committed or pushed)"
         exit 0
+    fi
+    if [ -z "$MSG" ] && [ -t 0 ]; then
+        echo
+        read -r -p "What did you change today? (Enter = automatic message) " MSG
     fi
     git commit -q -m "${MSG:-Update $(date '+%Y-%m-%d %H:%M') from $(hostname)}"
 fi

@@ -27,10 +27,11 @@ Copy this block to the top of the list and fill it in:
 ## 2026-10-07 — One-command push to GitHub (`gitpush.sh`)
 **By:** Pramoth (with Claude)
 **Changed:** `gitpush.sh` (new), `.gitignore`
-**You need to:** nothing. To use it: `./gitpush.sh "message"` (needs `gh auth login` once).
+**You need to:** nothing. To use it: `./gitpush.sh` (needs `gh auth login` once).
 
-- `./gitpush.sh` commits everything and pushes it to `github.com/PRAMOTH-S/nexva_ws`
-  (private). `--dry` shows what would go up. Not the same as `push.sh` (that one is laptop → Pi).
+- `./gitpush.sh` lists what changed, asks "What did you change today?", uses your
+  answer as the commit message, and pushes to `github.com/PRAMOTH-S/nexva_ws`
+  (private). Passing the message as an argument skips the question. `--dry` shows what would go up. Not the same as `push.sh` (that one is laptop → Pi).
 - Never force-pushes. If GitHub has newer commits, it rebases first, and on a conflict it stops.
 - `.gitignore` now also excludes `push.sh`'s `.push_history` / `.last_push` / `.push_by`.
 
