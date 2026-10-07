@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nexva Waypoints</title>
+<title>Nexva Control</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --line: #d9dee5; --ink: #1a1f26;
@@ -82,6 +82,43 @@
     background: color-mix(in srgb, var(--bad) 10%, transparent); }
   select { font: inherit; padding: 8px; border-radius: 8px;
     border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  .mapwrap {
+    position: relative; border: 1px solid var(--line); border-radius: 8px;
+    overflow: hidden; background: var(--bg); line-height: 0;
+  }
+  .mapwrap canvas {
+    display: block; width: 100%; height: auto; touch-action: none;
+    cursor: crosshair; image-rendering: pixelated;
+  }
+  .maphint {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 13px; color: var(--muted);
+    background: var(--panel); line-height: 1.5;
+  }
+  .maphint[hidden] { display: none !important; }
+  .bar {
+    height: 8px; border-radius: 999px; background: var(--sunken, var(--bg));
+    border: 1px solid var(--line); overflow: hidden;
+  }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  /* Live speed: measured fills the bar, commanded is the thin marker. */
+  .speed { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+    align-items: center; margin-top: 12px; padding-top: 12px;
+    border-top: 1px solid var(--line); }
+  .speed .big { font-size: 26px; font-weight: 600; line-height: 1.1;
+    font-variant-numeric: tabular-nums; min-width: 4.2ch; }
+  .speed .big small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+  .speed .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .speedbar { position: relative; height: 10px; }
+  .speedbar i { transition: width .2s linear; }
+  .speedbar i.rev { background: var(--warn); }
+  .speedbar b { position: absolute; top: -3px; bottom: -3px; width: 2px;
+    background: var(--ink); left: 0; transition: left .2s linear; border-radius: 1px; }
+  .speed.stale .big, .speed.stale .speedbar { opacity: .4; }
+  .pill[hidden] { display: none; }
+  .pill.alert { border-color: var(--warn); color: var(--warn); }
+  .pill.alert.bad { border-color: var(--bad); color: var(--bad); }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
   .joywrap { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
   .joy {
     position: relative; width: 190px; height: 190px; flex: none;
@@ -105,19 +142,321 @@
   }
   .joyread { flex: 1; min-width: 130px; }
   .joyread .stat { margin-bottom: 8px; }
+  button.danger {
+    background: var(--stop); border-color: var(--stop); color: #fff; font-weight: 600;
+  }
+  .modal-back {
+    position: fixed; inset: 0; z-index: 50; display: flex;
+    align-items: center; justify-content: center; padding: 16px;
+    background: rgba(0,0,0,.5);
+  }
+  .modal-back[hidden] { display: none; }
+  .modal {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; width: 100%; max-width: 420px;
+    max-height: 85vh; overflow-y: auto; box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  .modal h3 { margin: 0 0 4px; font-size: 16px; }
+  .modal .modal-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+  .modal .mapbtn {
+    display: flex; gap: 8px; align-items: center; text-align: left; width: 100%;
+  }
+  .modal .mapbtn b { font-weight: 600; }
+  .modal .mapbtn .when { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .modal .mapbtn .star { color: var(--ok); font-weight: 700; cursor: help; }
+  .modal input[type=text] {
+    font: inherit; width: 100%; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  .modal .warnline { color: var(--warn); font-size: 13px; margin-top: 6px; min-height: 1.4em; }
+  .modal .badline { color: var(--bad); font-size: 13px; margin-top: 6px; }
+  .modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  .maps { font-size: 13px; }
+  .maprow {
+    display: flex; gap: 8px; align-items: center; padding: 4px 0;
+    border-top: 1px solid var(--line);
+  }
+  .maprow:first-child { border-top: 0; }
+  .maprow b { font-weight: 600; }
+  .maprow .star { color: var(--ok); font-weight: 700; cursor: help; }
+  .badge {
+    font-size: 11px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .legend {
+    display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px;
+    color: var(--muted); margin-top: 6px; line-height: 1.2;
+  }
+  .legend i {
+    display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+    vertical-align: -2px; margin-right: 4px; border: 1px solid var(--line);
+  }
+  .bad-age { color: var(--bad); font-weight: 600; }
+  /* ---- tabs. Plain show/hide: nothing is unmounted, so every control,
+     listener and the map canvas survive a tab switch untouched. ---- */
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs .tab { flex: 1; font-weight: 600; }
+  .tabs .tab.active {
+    border-color: var(--accent); color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  }
+  .cores {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+    gap: 6px; margin-top: 12px;
+  }
+  .core { font-size: 11px; color: var(--muted); }
+  .core .bar { height: 6px; margin-bottom: 3px; }
+  .core .bar i { background: var(--ok); }
+  .core.hot .bar i { background: var(--warn); }
+  .core.max .bar i { background: var(--bad); }
+  .na { color: var(--muted); font-style: italic; }
+  .pill.ok { border-color: var(--ok); color: var(--ok); }
+  .pill.warn { border-color: var(--warn); color: var(--warn); }
+  .pill.bad { border-color: var(--bad); color: var(--bad); }
+  .roslog { max-height: 340px; color: var(--ink); }
+  .rl { white-space: pre-wrap; word-break: break-word; }
+  .rl.dbg { color: var(--muted); }
+  .rl.inf { color: var(--ink); }
+  .rl.wrn { color: var(--warn); }
+  .rl.err { color: var(--bad); }
+  .rl.ftl { color: var(--bad); font-weight: 700; }
+  .cmdline {
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 13px;
+    border: 1px solid var(--line); background: var(--bg);
+    overflow-x: auto; white-space: pre;
+  }
+  pre.out {
+    margin: 8px 0 0; padding: 10px; border-radius: 8px; max-height: 320px;
+    overflow: auto; font-size: 12px; line-height: 1.45;
+    font-family: ui-monospace, Menlo, monospace;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  input[type=text] {
+    font: inherit; padding: 8px; border-radius: 8px; min-width: 150px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  .stat.na b { color: var(--muted); font-weight: 500; }
+  .modeinfo.warn { color: var(--warn); }
+  button.primary.goal { background: #a855f7; border-color: #a855f7; }
+  button.primary.queue { background: #0891b2; border-color: #0891b2; }
+  /* Always-on-screen bar: STOP must never be a scroll away, and the speed
+     and mode are what you watch while the robot drives. */
+  body { padding-bottom: 96px; }
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: var(--panel); border-top: 1px solid var(--line);
+    box-shadow: 0 -4px 16px rgba(0,0,0,.08);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  }
+  .dock .in { max-width: 720px; margin: 0 auto; display: flex; gap: 12px; align-items: center; }
+  .dock .read { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .dock .read b { font-size: 18px; font-variant-numeric: tabular-nums; }
+  #dk-mode { font-size: 12px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  #dk-mode.alert { color: var(--warn); font-weight: 600; }
+  .dock button.stop { width: auto; min-width: 132px; padding: 14px 22px; }
   @media (max-width: 480px) {
     .wps { grid-template-columns: 1fr 1fr; }
     .joywrap { justify-content: center; }
   }
+
+  /* =====================================================================
+     THEME. Everything above is the original layout; this layer only
+     restyles it, so every id, handler and behaviour is unchanged.
+     ===================================================================== */
+  :root {
+    --bg: #eef1f7; --panel: #ffffff; --panel-2: #f6f8fc; --line: #e2e7f0;
+    --ink: #0f172a; --muted: #64748b; --accent: #4f46e5; --accent-2: #06b6d4;
+    --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --stop: #e11d48;
+    --sunken: #edf0f6;
+    --shadow: 0 1px 2px rgba(15,23,42,.05), 0 6px 24px rgba(15,23,42,.06);
+    --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+    --r: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a0e16; --panel: #121826; --panel-2: #172033; --line: #233047;
+      --ink: #e7ecf5; --muted: #8d9ab0; --accent: #818cf8; --accent-2: #22d3ee;
+      --ok: #34d399; --warn: #fbbf24; --bad: #f87171; --stop: #f43f5e;
+      --sunken: #0e1420;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0e16; --panel: #121826; --panel-2: #172033; --line: #233047;
+    --ink: #e7ecf5; --muted: #8d9ab0; --accent: #818cf8; --accent-2: #22d3ee;
+    --ok: #34d399; --warn: #fbbf24; --bad: #f87171; --stop: #f43f5e;
+    --sunken: #0e1420;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
+  }
+  body {
+    font: 15px/1.5 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background:
+      radial-gradient(1200px 380px at 15% -120px, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%),
+      radial-gradient(900px 320px at 95% -140px, color-mix(in srgb, var(--accent-2) 12%, transparent), transparent 70%),
+      var(--bg);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; }
+
+  /* header */
+  .top { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin: 4px 0 18px; }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .logo { width: 42px; height: 42px; flex: none;
+    filter: drop-shadow(0 4px 10px color-mix(in srgb, var(--accent) 35%, transparent)); }
+  h1 { font-size: 22px; letter-spacing: -.02em; margin: 0; line-height: 1.15; }
+  h1 span { font-weight: 500; color: var(--muted); }
+  .top .sub { margin: 2px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* tabs: segmented control */
+  .tabs { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 4px; gap: 4px; box-shadow: var(--shadow); margin-bottom: 14px; }
+  .tabs .tab { border: 0; background: transparent; border-radius: 9px; padding: 9px 12px;
+    color: var(--muted); transition: background .15s, color .15s; }
+  .tabs .tab:hover:not(:disabled) { color: var(--ink); }
+  .tabs .tab.active { color: #fff; border: 0;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--accent-2)));
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+  /* cards */
+  .card { border-radius: var(--r); padding: 18px; margin-bottom: 14px;
+    border-color: var(--line); box-shadow: var(--shadow); }
+  .card h2 { display: flex; align-items: center; gap: 8px; font-size: 11.5px;
+    letter-spacing: .09em; color: var(--muted); margin-bottom: 12px; }
+  .card h2::before { content: ''; width: 8px; height: 8px; border-radius: 3px; flex: none;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  .sub { color: var(--muted); }
+
+  /* buttons */
+  button { border-radius: 10px; font-weight: 500; transition:
+    transform .06s, box-shadow .15s, border-color .15s, background .15s; }
+  button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+    box-shadow: 0 2px 10px rgba(15,23,42,.08); }
+  button:active:not(:disabled) { transform: translateY(1px) scale(.99); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: none; box-shadow: var(--ring); }
+  button.primary { border: 0; color: #fff; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, var(--accent-2)));
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 30%, transparent); }
+  button.primary:hover:not(:disabled) { filter: brightness(1.06);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 40%, transparent); }
+  button.danger, button.stop { border: 0;
+    background: linear-gradient(135deg, var(--stop), color-mix(in srgb, var(--stop) 75%, #000));
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--stop) 35%, transparent); }
+  button.stop { border-radius: 12px; letter-spacing: .06em; }
+  select, input[type=text], input[type=number] { border-radius: 10px; background: var(--panel-2); }
+  input[type=number] { font: inherit; padding: 8px; border: 1px solid var(--line); color: var(--ink); }
+
+  /* pills, stats, bars */
+  .pill { background: var(--panel-2); border-color: var(--line); padding: 4px 11px; font-weight: 500; }
+  .dot.ok { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .dot.bad { box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 22%, transparent); }
+  .dot.warn { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent); }
+  .stats { gap: 10px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .stat b { font-size: 20px; letter-spacing: -.01em; }
+  .joyread .stat { background: none; border: 0; padding: 0; }
+  .bar { background: var(--sunken); border-color: var(--line); }
+  .bar i { background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; }
+  .core .bar i { background: var(--ok); }
+
+  /* live speed */
+  .speed { border-top: 0; margin-top: 12px; padding: 14px; border-radius: 12px;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, var(--panel-2)),
+                                        color-mix(in srgb, var(--accent-2) 7%, var(--panel-2)));
+    border: 1px solid var(--line); }
+  .speed .big { font-size: 32px; letter-spacing: -.02em; }
+  .speedbar { height: 12px; }
+
+  /* waypoint tiles */
+  .wp { background: var(--panel-2); border-radius: 12px; padding: 10px 12px; }
+  .wp:hover:not(:disabled) { transform: translateY(-1px); }
+
+  /* mission buttons: bigger, equal tiles */
+  #m-explore, #m-clean, #m-navigate, #m-manual, #m-save, #m-stop { flex: 1 1 120px; padding: 12px 14px; }
+
+  /* map + joystick */
+  .mapwrap { border-radius: 12px; background: var(--sunken); }
+  .joy { background:
+      radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent) 0%, transparent 68%),
+      var(--panel-2); box-shadow: inset 0 2px 10px rgba(0,0,0,.06); }
+  .knob { background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 45%, transparent); }
+
+  /* banners, log, modal */
+  .banner { border-radius: 12px; }
+  .log, pre.out, .cmdline { border-radius: 10px; }
+  .log { background: var(--panel-2); padding: 8px 10px; border: 1px solid var(--line); }
+  .modal { border-radius: 16px; }
+  .modal-back { backdrop-filter: blur(3px); }
+
+  /* bottom dock */
+  .dock { background: color-mix(in srgb, var(--panel) 94%, transparent);
+    backdrop-filter: saturate(1.4) blur(10px); }
+  .dock .read b { font-size: 22px; letter-spacing: -.02em; }
+  .dock .in { max-width: 760px; }
+
+  /* The dock's STOP is always on screen, so the in-page one is redundant
+     on small screens where it only adds scrolling. Kept on desktop. */
+  @media (max-width: 979px) { .card-stop { display: none; } }
+
+  /* desktop: two columns per tab */
+  .page[hidden] { display: none !important; }
+  @media (min-width: 980px) {
+    .wrap, .dock .in { max-width: 1220px; }
+    .page { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+      gap: 16px; align-items: start; }
+    .col > .card:last-child { margin-bottom: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
 </style>
 </head>
 <body>
+<div class="dock" role="region" aria-label="Robot quick controls">
+  <div class="in">
+    <div class="read">
+      <b><span id="dk-v">–</span> <small style="font-size:12px;font-weight:400;color:var(--muted)">m/s</small></b>
+      <span id="dk-mode">mode: –</span>
+    </div>
+    <button class="stop" id="stop-dock" title="Stop everything (Esc)">STOP</button>
+  </div>
+</div>
 <div class="wrap">
-  <h1>Nexva Waypoints</h1>
-  <div class="sub" id="sub">connecting…</div>
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 40 40" aria-hidden="true">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent-2)"/></linearGradient></defs>
+        <circle cx="20" cy="20" r="18" fill="url(#lg)"/>
+        <circle cx="20" cy="20" r="11.5" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="2.2"/>
+        <circle cx="20" cy="13" r="2.6" fill="#fff"/>
+        <path d="M13 25.5h14" stroke="#fff" stroke-opacity=".9" stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <h1>Nexva <span>Control</span></h1>
+        <div class="sub" id="sub">connecting…</div>
+      </div>
+    </div>
+  </header>
 
+  <div id="linkbanner" class="banner bad" hidden>
+    Link lost — the robot is still autonomous (an explore/clean mission is
+    running and does not need this page). Use the physical cutoff if needed.
+  </div>
   <div id="banner" class="banner" hidden></div>
 
+  <div class="tabs">
+    <button class="tab active" id="tab-control">Control</button>
+    <button class="tab" id="tab-diag">Diagnostics</button>
+  </div>
+
+  <div id="page-control" class="page">
+
+  <div class="col col-main">
   <div class="card">
     <h2>Status</h2>
     <div class="row" style="margin-bottom:12px">
@@ -131,8 +470,115 @@
       <div class="stat"><b id="s-rec">–</b><span>recoveries</span></div>
       <div class="stat"><b id="s-pose">–</b><span>x, y, yaw</span></div>
     </div>
+    <div class="speed stale" id="speed" title="Measured from wheel odometry; the dark marker is the commanded speed">
+      <div class="big" id="sp-v">–<small>m/s</small></div>
+      <div>
+        <div class="bar speedbar"><i id="sp-bar"></i><b id="sp-cmd"></b></div>
+        <div class="row" style="justify-content:space-between;margin-top:4px">
+          <span class="meta" id="sp-meta">waiting for /odom…</span>
+          <span class="pill" id="sp-guard" hidden><i class="dot warn"></i><span id="sp-guard-t"></span></span>
+        </div>
+      </div>
+    </div>
   </div>
 
+  <div class="card">
+    <h2>Autonomous mission</h2>
+    <div class="sub" style="margin-bottom:10px">
+      <b>Explore</b> builds a new map on its own and cleans as it goes.
+      <b>Clean</b> sweeps a saved map. <b>Navigate</b> is the waypoint stack on
+      a saved map (what runs by default). Nothing here starts on its own —
+      every mission begins with a click.
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <span class="pill"><i class="dot" id="d-mode"></i><span class="mono" id="t-mode">mode: –</span></span>
+      <span class="sub" id="mode-detail" style="margin:0"></span>
+    </div>
+    <div class="sub" id="mode-err" style="color:var(--bad);margin-bottom:8px" hidden></div>
+    <div class="row">
+      <button id="m-explore" class="primary">EXPLORE</button>
+      <button id="m-clean" class="primary">CLEAN</button>
+      <button id="m-navigate">NAVIGATE</button>
+      <button id="m-manual">MANUAL</button>
+      <button id="m-save" title="Save the live map and the robot's pose now">SAVE MAP</button>
+      <button id="m-stop" class="danger">STOP MISSION</button>
+    </div>
+    <div id="explorer-row" hidden>
+      <div class="row" style="margin-top:10px">
+        <button id="x-pause">PAUSE</button>
+        <button id="x-resume">RESUME</button>
+        <span class="pill"><i class="dot" id="d-expl"></i><span id="t-expl">explorer</span></span>
+        <div class="bar" style="flex:1;min-width:80px"><i id="cov-bar"></i></div>
+        <span class="sub mono" id="cov-pct" style="margin:0">0%</span>
+      </div>
+      <div class="sub mono" style="margin:6px 0 0"><span id="x-status"></span><span id="x-ages"></span></div>
+    </div>
+    <div style="margin-top:12px">
+      <div class="row" style="margin-bottom:4px">
+        <span class="sub" style="margin:0;flex:1">Saved maps</span>
+        <span class="sub" style="margin:0;font-size:12px">* = has a pose graph (best for cleaning)</span>
+      </div>
+      <div class="maps" id="maps">loading…</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Vacuum zone</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Drag a rectangle on the map to mark the area to clean. The robot plans a
+      perimeter pass plus parallel rows inside it, then drives them through Nav2.
+    </div>
+    <div class="mapwrap">
+      <canvas id="mapcanvas"></canvas>
+      <div class="maphint" id="maphint">loading map…</div>
+    </div>
+    <div class="legend">
+      <span><i style="background:#2563eb;border-radius:50%"></i>robot</span>
+      <span><i style="background:rgba(40,200,90,0.6)"></i>cleaned</span>
+      <span><i style="background:rgba(230,60,40,0.5)"></i>to do</span>
+      <span><i style="background:rgba(40,120,255,0.7)"></i>working</span>
+      <span><i style="background:rgba(150,150,160,0.5)"></i>given up</span>
+      <span><i style="background:#ffd23f"></i>path</span>
+      <span><i style="background:rgba(22,163,74,0.9)"></i>zone sweep</span>
+      <span><i style="background:#a855f7;border-radius:50%"></i>goal</span>
+      <span><i style="background:#0891b2;border-radius:50%"></i>queued stop</span>
+      <span class="mono" id="map-source"></span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="pose-pick">Set 2D pose</button>
+      <span id="poseinfo" class="sub modeinfo" style="flex:1">
+        tell the robot where it is by pointing at the map
+        (works while NAVIGATE or CLEAN is running, not while exploring)
+      </span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="goal-pick">Send goal</button>
+      <span id="goalinfo" class="sub modeinfo" style="flex:1">
+        drive to a spot: drag from the target the way it should face
+      </span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="queue-pick">Queue points</button>
+      <span id="queueinfo" class="sub modeinfo" style="flex:1">
+        click the map to drop numbered stops, then Run
+      </span>
+      <button id="queue-clear">Clear</button>
+      <button id="queue-run" class="primary">Run</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span id="zoneinfo" class="sub" style="flex:1">no zone drawn</span>
+      <button id="zone-clear">Clear</button>
+      <button id="zone-plan">Preview plan</button>
+      <button id="zone-start" class="primary">Start cleaning</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="pill"><i class="dot" id="d-zone"></i><span id="t-zone">idle</span></span>
+      <div class="bar" style="flex:1"><i id="zone-bar"></i></div>
+      <span class="sub mono" id="zone-pct">0%</span>
+    </div>
+  </div>
+  </div>
+  <div class="col col-side">
   <div class="card">
     <h2>Go to</h2>
     <div class="wps" id="wps"></div>
@@ -182,6 +628,39 @@
   </div>
 
   <div class="card">
+    <h2>Motor limits (ESP32 PID)</h2>
+    <div class="sub" style="margin-bottom:10px">
+      The PWM band the wheel controller is allowed to use, and the speed cap.
+      <b>Min PWM</b> is where the wheels actually break away - below it the
+      motors buzz without turning. Raise it on thick carpet or a low battery;
+      lower it if the robot creeps when told to stop. Applied live, no reflash.
+    </div>
+    <div class="row" style="gap:12px;flex-wrap:wrap">
+      <label class="sub">Min PWM
+        <input id="pid-min" type="number" min="0" max="255" step="1" value="150"
+               style="width:80px">
+      </label>
+      <label class="sub">Max PWM
+        <input id="pid-max" type="number" min="40" max="255" step="1" value="255"
+               style="width:80px">
+      </label>
+      <label class="sub">Max speed (m/s)
+        <input id="pid-speed" type="number" min="0.01" max="0.50" step="0.01"
+               value="0.30" style="width:80px">
+      </label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span id="pid-info" class="sub" style="flex:1">using firmware defaults</span>
+      <button id="pid-reset">Defaults</button>
+      <button id="pid-apply" class="primary">Apply</button>
+    </div>
+    <div class="sub" style="margin-top:8px">
+      The ESP32 reverts to its compiled defaults on every reboot, so these are
+      resent automatically every few seconds once you have applied them.
+    </div>
+  </div>
+
+  <div class="card card-stop">
     <button class="stop" id="stop">STOP</button>
     <div class="sub" style="margin-top:8px;text-align:center">
       Cancels the goal and zeroes the base. Not a substitute for a physical cutoff.
@@ -192,11 +671,131 @@
     <h2>Log</h2>
     <div class="log" id="log"></div>
   </div>
+  </div>
+
+  </div><!-- /page-control -->
+
+  <div id="page-diag" class="page" hidden>
+
+  <div class="col col-main">
+  <div class="card">
+    <h2>Raspberry Pi</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Read from <span class="mono">/proc</span>, <span class="mono">/sys</span>
+      and <span class="mono">vcgencmd</span> on whichever machine is running
+      this bridge. Anything the board cannot report says so — nothing on this
+      card is estimated.
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <span class="pill"><i class="dot" id="d-health"></i><span class="mono" id="t-health">waiting…</span></span>
+      <span class="sub mono" id="h-uptime" style="margin:0"></span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="h-cpu">–</b><span>cpu busy</span></div>
+      <div class="stat"><b id="h-temp">–</b><span>soc temp</span></div>
+      <div class="stat"><b id="h-mem">–</b><span>memory used</span></div>
+      <div class="stat"><b id="h-disk">–</b><span>disk free</span></div>
+      <div class="stat"><b id="h-load">–</b><span>load 1m</span></div>
+      <div class="stat"><b id="h-clock">–</b><span>cpu clock</span></div>
+    </div>
+    <div class="cores" id="h-cores"></div>
+    <div class="sub mono" id="h-detail" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Power &amp; throttling</h2>
+    <div class="sub" style="margin-bottom:10px">
+      The signal you get nowhere else. A Pi that browns out under motor load
+      caps its own clock and keeps running, so it presents as "the software
+      got slow" rather than as a power fault. <b>Since boot</b> is the half
+      that matters: a dip during a hard turn lasts milliseconds and no poll
+      will ever catch it live.
+    </div>
+    <div class="row" id="thr-now"></div>
+    <div class="row" id="thr-boot" style="margin-top:8px"></div>
+    <div class="sub mono" id="thr-raw" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>IMU &amp; motion check</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Live from <span class="mono">/imu</span>, about twice a second. With no
+      fresh sample the numbers are blanked, never left on screen. In
+      accel-only mode the sensor has no heading, and the card says so instead
+      of showing one.
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <span class="pill"><i class="dot" id="d-imu"></i><span class="mono" id="t-imu">waiting…</span></span>
+      <span class="pill"><i class="dot" id="d-stall"></i><span class="mono" id="t-stall">motion check: –</span></span>
+    </div>
+    <div class="stats">
+      <div class="stat na" id="i-ax-box"><b id="i-ax">–</b><span>accel x (m/s²)</span></div>
+      <div class="stat na" id="i-ay-box"><b id="i-ay">–</b><span>accel y (m/s²)</span></div>
+      <div class="stat na" id="i-az-box"><b id="i-az">–</b><span>accel z (m/s²)</span></div>
+      <div class="stat na" id="i-wz-box"><b id="i-wz">–</b><span>gyro z (rad/s)</span></div>
+    </div>
+    <div class="sub mono" id="i-orient" style="margin-top:10px"></div>
+    <div class="sub mono" id="i-stall" style="margin-top:6px"></div>
+    <div class="sub mono" id="i-calib" style="margin-top:6px"></div>
+  </div>
+  </div>
+  <div class="col col-side">
+  <div class="card">
+    <h2>ROS log (/rosout)</h2>
+    <div class="sub" style="margin-bottom:10px">
+      Every node's log, mirrored by the bridge. The last few hundred lines are
+      kept in memory, so this already has history when you open it.
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <select id="rl-level">
+        <option value="20">info and above</option>
+        <option value="30">warnings and above</option>
+        <option value="40">errors only</option>
+      </select>
+      <select id="rl-node"><option value="">all nodes</option></select>
+      <button id="rl-pause">Pause scroll</button>
+      <button id="rl-clear">Clear</button>
+      <span class="sub mono" id="rl-count" style="flex:1;text-align:right;margin:0"></span>
+    </div>
+    <div class="log roslog" id="roslog"></div>
+  </div>
+
+  <div class="card">
+    <h2>Console</h2>
+    <div class="sub" style="margin-bottom:10px">
+      A fixed list of read-only commands, picked from a menu rather than typed.
+      This page is unauthenticated and reachable by anything on the same
+      network, and it drives real motors — so there is nothing here that can
+      publish, write, kill or reboot, and no free-text box that could.
+    </div>
+    <div class="row">
+      <select id="con-op"></select>
+      <input id="con-a0" type="text" class="mono" hidden>
+      <input id="con-a1" type="text" class="mono" hidden>
+      <button id="con-run" class="primary">Run</button>
+    </div>
+    <div class="sub" id="con-help" style="margin-top:8px">loading…</div>
+    <div class="mono cmdline" id="con-preview">–</div>
+    <pre class="out" id="con-out">nothing run yet</pre>
+  </div>
+  </div>
+
+  </div><!-- /page-diag -->
+</div>
+
+<div class="modal-back" id="modal-back" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+  </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 let ws, waypoints = [], state = {}, tour = [], reconnectDelay = 500;
+// autonomous mission state, as last reported by mode_manager / the explorer
+let robotMode = {}, explorerMode = null, explorerStatus = {}, savedMaps = [];
+let linkUp = false;
 
 function log(msg, cls) {
   const d = document.createElement('div');
@@ -208,9 +807,18 @@ function log(msg, cls) {
 
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { reconnectDelay = 500; setLink(true); log('connected', 'good'); };
+  ws.onopen = () => {
+    reconnectDelay = 500; setLink(true); log('connected', 'good');
+    loadMaps();   // read-only; no mission command is ever sent on connect
+    // The bridge seeds every new connection with its whole log ring, and the
+    // sequence numbers restart with the bridge process. Dropping what we had
+    // keeps the two from interleaving into nonsense after a restart.
+    clearRosLog();
+  };
   ws.onclose = () => {
     setLink(false);
+    // Nothing is going to answer a console run now.
+    $('con-run').disabled = false;
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 8000);
   };
@@ -223,13 +831,81 @@ function send(obj) {
 }
 
 function setLink(up) {
+  linkUp = up;
   $('d-link').className = 'dot ' + (up ? 'ok' : 'bad');
   $('t-link').textContent = up ? 'connected' : 'disconnected';
-  if (!up) { $('d-nav').className = 'dot'; $('t-nav').textContent = 'unknown'; }
+  if (!up) {
+    $('d-nav').className = 'dot'; $('t-nav').textContent = 'unknown';
+    paintSpeed({fresh: false, cmd_v: 0, max_v: 0, guard: ''});
+  }
+  renderLinkBanner();
+}
+
+function setInfo(id, text, warn) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle('warn', !!warn);
+}
+
+// Measured speed, commanded marker, and what the collision monitor is doing.
+// The bar is drawn against the ESP32's cap, so "full" means "at the limit".
+const GUARD_TEXT = {stop: 'obstacle — stopped', slowdown: 'obstacle — slowing',
+                    approach: 'obstacle ahead — slowing', limit: 'speed limited'};
+let dockGuard = '';
+function paintDockMode() {
+  const el = $('dk-mode');
+  if (robotMode.error) { el.className = 'alert'; el.textContent = 'mission refused: ' + robotMode.error; return; }
+  if (dockGuard) { el.className = 'alert'; el.textContent = dockGuard; return; }
+  el.className = '';
+  const mode = robotMode.mode || '–';
+  el.textContent = `mode: ${mode}${robotMode.map ? ' · ' + robotMode.map : ''}` +
+                   (explorerMode ? ` · ${explorerMode}` : '');
+}
+function paintSpeed(m) {
+  const box = $('speed'), max = m.max_v > 0 ? m.max_v : 0.3;
+  const pct = v => Math.min(100, Math.abs(v) / max * 100);
+  box.classList.toggle('stale', !m.fresh);
+  if (m.fresh) {
+    $('sp-v').firstChild.nodeValue = Math.abs(m.v).toFixed(2);
+    $('sp-bar').style.width = pct(m.v) + '%';
+    $('sp-bar').classList.toggle('rev', m.v < -0.01);
+    const deg = m.w * 180 / Math.PI;
+    $('sp-meta').textContent = `${m.v < -0.01 ? 'reversing · ' : ''}turn ${deg.toFixed(0)}°/s` +
+      ` · cmd ${m.cmd_v.toFixed(2)} m/s · max ${max.toFixed(2)}`;
+  } else {
+    $('sp-v').firstChild.nodeValue = '–';
+    $('sp-bar').style.width = '0';
+    $('sp-meta').textContent = 'no odometry — is bringup running?';
+  }
+  $('sp-cmd').style.left = `calc(${pct(m.cmd_v)}% - 1px)`;
+  $('dk-v').textContent = m.fresh ? Math.abs(m.v).toFixed(2) : '–';
+  const g = m.guard || '';
+  const note = g ? (GUARD_TEXT[g] || g) : '';
+  if (note !== dockGuard) { dockGuard = note; paintDockMode(); }
+  $('sp-guard').hidden = !g;
+  if (g) {
+    $('sp-guard').className = 'pill alert' + (g === 'stop' ? ' bad' : '');
+    $('sp-guard').firstChild.className = 'dot ' + (g === 'stop' ? 'bad' : 'warn');
+    $('sp-guard-t').textContent = GUARD_TEXT[g] || g;
+  }
 }
 
 function handle(m) {
   switch (m.type) {
+    case 'batch':
+      // One frame carries everything from the last ~200 ms: every log line in
+      // order, but only the newest of each high-rate event (pose, feedback,
+      // status...). One bad item must not cost the rest of the frame.
+      for (const it of (m.items || [])) {
+        try { handle(it); }
+        catch (err) { console.error('batch item', it && it.type, err); }
+      }
+      break;
+    case 'imu':
+      imuLast = m;
+      if (m.fresh) imuAt = Date.now();
+      paintImu();
+      break;
     case 'waypoints':
       waypoints = m.items;
       $('sub').textContent = `${m.items.length} waypoints · map "${m.map}" · frame ${m.frame_id}`;
@@ -238,9 +914,56 @@ function handle(m) {
     case 'state':
       state = m;
       renderState();
+      renderPidLimits(m.pid_limits, m.pid_limits_sent);
+      if (m.robot_mode) robotMode = m.robot_mode;
+      explorerMode = m.explorer_mode || null;
+      if (m.explorer_status) explorerStatus = m.explorer_status;
+      if (m.live_map_seq) liveMapSeq = m.live_map_seq;
+      renderMission();
+      renderExplorerStatus();
+      refreshMapSource();
+      renderZoneBackend();
+      renderQueueInfo();
+      break;
+    case 'robot_mode':
+      robotMode = m;
+      if (m.error) log('mission refused: ' + m.error, 'err');
+      else log(`mode ${m.mode}${m.map ? ' "' + m.map + '"' : ''}${m.detail ? ' — ' + m.detail : ''}`);
+      renderMission();
+      refreshMapSource();
+      break;
+    case 'explorer_mode':
+      if (m.mode !== explorerMode) {
+        log('explorer: ' + (m.mode || 'gone'), m.mode === 'done' ? 'good' : undefined);
+      }
+      explorerMode = m.mode || null;
+      if (!explorerMode) { explorePath = []; drawMap(); }
+      renderMission();
+      refreshMapSource();
+      break;
+    case 'explorer_status':
+      explorerStatus = m;
+      renderExplorerStatus();
+      break;
+    case 'coverage_blocks':
+      scheduleFetch('coverage', loadCoverage, 1000);
+      break;
+    case 'explore_path':
+      scheduleFetch('path', loadExplorePath, 500);
+      break;
+    case 'live_map':
+      liveMapSeq = m.seq;
+      break;
+    case 'speed':
+      paintSpeed(m);
       break;
     case 'pose':
       $('s-pose').textContent = `${m.x.toFixed(2)}, ${m.y.toFixed(2)}, ${m.yaw.toFixed(0)}°`;
+      robotPose = {x: m.x, y: m.y, yaw: m.yaw};
+      drawMap();
+      break;
+    case 'zone_plan':
+      loadPlan();
       break;
     case 'feedback':
       if (m.distance_remaining !== undefined) {
@@ -250,6 +973,11 @@ function handle(m) {
         if (m.recoveries > 0) $('s-rec').style.color = 'var(--warn)';
       } else {
         $('t-nav').textContent = `waypoint ${m.waypoint_index + 1}/${m.total}: ${m.waypoint_name}`;
+        // the numbered stops dropped on the map: mark the one being driven to
+        if (/^P\d+$/.test(m.waypoint_name || '') && queuePts.length) {
+          queueActive = m.waypoint_index;
+          drawMap();
+        }
       }
       break;
     case 'result':
@@ -257,22 +985,96 @@ function handle(m) {
           m.status === 'SUCCEEDED' ? 'good' : 'err');
       $('s-dist').textContent = '–'; $('s-eta').textContent = '–';
       $('s-rec').textContent = '–'; $('s-rec').style.color = '';
+      goalMark = null; queueActive = -1; drawMap();
       break;
     case 'initial_pose':
+      if (m.stage === 'sent') {
+        // Answered as soon as the pose is out, before the settle wait.
+        log(`2D pose sent to AMCL at ${m.x.toFixed(2)}, ${m.y.toFixed(2)} ` +
+            `@ ${(m.yaw * 180 / Math.PI).toFixed(0)}° — waiting for it to converge…`);
+        setInfo('poseinfo', 'pose sent to AMCL — waiting for it to converge…');
+        break;
+      }
       log(`initial pose set at "${m.waypoint}" — ${m.localized ? 'AMCL converged' : 'NOT converged yet'}`,
           m.localized ? 'good' : 'err');
+      setInfo('poseinfo', m.localized ? 'pose set - AMCL converged'
+                                      : 'pose sent, but AMCL has not converged yet', !m.localized);
       break;
     case 'map_check':
       log('map check: ' + (m.ok ? 'OK' : m.detail), m.ok ? 'good' : 'err');
       break;
-    case 'ack':  log(m.cmd + ' acknowledged'); break;
-    case 'error': log(m.msg, 'err'); break;
+    case 'zone_state': {
+      // Nothing is listening for zones, so whatever this says is not live.
+      if (state.zone_ready === false) break;
+      const st = m.state || 'unknown', pr = m.progress || 0;
+      $('t-zone').textContent = st;
+      $('d-zone').className = 'dot ' + (st === 'cleaning' ? 'warn'
+                                      : st === 'planning' ? 'warn' : 'ok');
+      $('zone-bar').style.width = (pr * 100).toFixed(0) + '%';
+      $('zone-pct').textContent = (pr * 100).toFixed(0) + '%';
+      break;
+    }
+    case 'pid_limits':
+      renderPidLimits(m, true);
+      log('motor limits applied: pwm ' + m.min_pwm + '-' + m.max_pwm
+          + ', ' + m.max_speed + ' m/s');
+      break;
+    case 'ack':
+      // `detail` is the server saying what actually happened (who received
+      // it); only fall back to the bare "acknowledged" when it has nothing.
+      log(m.cmd + (m.mode ? ' ' + m.mode : '') + (m.command ? ' ' + m.command : '')
+          + (m.map ? ' "' + m.map + '"' : '')
+          + (m.detail ? ' - ' + m.detail : ' acknowledged'),
+          m.detail ? 'good' : undefined);
+      if (m.cmd === 'goto_pose') setInfo('goalinfo', m.detail);
+      if (m.cmd === 'tour_points') setInfo('queueinfo', m.detail);
+      break;
+    case 'map_deleted':
+      if (m.ok) log(`map deleted "${m.name}" (${(m.deleted || []).length} files; ${m.registry})`, 'good');
+      else log(`map delete refused "${m.name || ''}": ${m.error}`, 'err');
+      loadMaps();
+      break;
+    case 'save_result':
+      if (m.ok) {
+        const p = m.pose ? ` · resumes at (${(+m.pose.x).toFixed(2)}, ${(+m.pose.y).toFixed(2)}) ${(+m.pose.yaw_deg).toFixed(0)}°` : '';
+        log(`map saved "${m.name}"${p}`, 'good');
+        for (const w of (m.warnings || [])) log('save warning: ' + w, 'err');
+        loadMaps();
+      } else {
+        log('map SAVE FAILED: ' + (m.error || 'unknown error'), 'err');
+      }
+      break;
+    case 'log_history':
+      addLogEntries(m.items || []);
+      break;
+    case 'log':
+      addLogEntries([m]);
+      break;
+    case 'health':
+      renderHealth(m.health);
+      break;
+    case 'console_result':
+      showConsoleResult(m);
+      break;
+    case 'error':
+      log(m.msg, 'err');
+      noteCommandError(m);
+      // A refusal may be the answer to a console run, which left its button
+      // disabled waiting for a reply that is now never coming.
+      $('con-run').disabled = false;
+      break;
   }
 }
 
 function renderState() {
   $('d-loc').className = 'dot ' + (state.localized ? 'ok' : 'bad');
-  $('t-loc').textContent = state.localized ? 'localized' : 'not localized';
+  const locSrc = state.localized_source === 'slam' ? ' (SLAM)'
+               : state.localized_source === 'amcl' ? ' (AMCL)' : '';
+  $('t-loc').textContent = state.localized ? 'localized' + locSrc : 'not localized';
+  $('t-loc').title = state.localized_source === 'slam'
+    ? 'map -> base_footprint is live from slam_toolbox (no AMCL running)'
+    : state.localized_source === 'amcl' ? 'AMCL covariance is below the threshold'
+    : 'no fresh map -> base_footprint transform';
   $('d-nav').className = 'dot ' + (state.navigating ? 'warn' : 'ok');
   $('t-nav').textContent = state.navigating ? ('→ ' + state.destination) : 'idle';
 
@@ -280,7 +1082,8 @@ function renderState() {
   if (state.map_ok === false) {
     b.hidden = false; b.className = 'banner bad';
     b.textContent = `Loaded map does not match this waypoint file (expects "${state.map}"). Movement is blocked.`;
-  } else if (!state.nav_ready) {
+  } else if (!state.nav_ready && !missionAutonomous()) {
+    // (expected while an explore/clean mission owns the robot)
     b.hidden = false; b.className = 'banner';
     b.textContent = 'Nav2 navigate_to_pose is not available — is the navigation stack running?';
   } else if (!state.localized) {
@@ -337,10 +1140,999 @@ $('init-btn').onclick = () => {
                `goal afterwards wrong.`)) return;
   send({cmd: 'set_initial_pose', waypoint: name, confirmed: true});
 };
-$('stop').onclick = () => { log('STOP', 'err'); send({cmd: 'estop'}); };
+function renderPidLimits(l, applied) {
+  if (!l) return;
+  // Only overwrite the boxes the operator is not currently typing into.
+  for (const [id, v] of [['pid-min', l.min_pwm], ['pid-max', l.max_pwm],
+                         ['pid-speed', l.max_speed]]) {
+    if (document.activeElement !== $(id)) $(id).value = v;
+  }
+  $('pid-info').textContent = applied
+    ? 'active: pwm ' + l.min_pwm + '-' + l.max_pwm + ', ' + l.max_speed + ' m/s'
+    : 'using firmware defaults';
+}
+
+$('pid-apply').onclick = () => {
+  const min = parseInt($('pid-min').value, 10);
+  const max = parseInt($('pid-max').value, 10);
+  const spd = parseFloat($('pid-speed').value);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(spd)) {
+    log('motor limits: fill in all three boxes', 'err');
+    return;
+  }
+  if (min >= max) {
+    log('motor limits: min PWM must be below max PWM', 'err');
+    return;
+  }
+  log('motor limits -> pwm ' + min + '-' + max + ', ' + spd + ' m/s');
+  send({cmd: 'pid_limits', min_pwm: min, max_pwm: max, max_speed: spd});
+};
+
+$('pid-reset').onclick = () => {
+  log('motor limits -> firmware defaults');
+  send({cmd: 'pid_limits_reset'});
+};
+
+/* ---- autonomous missions ------------------------------------------------
+   mode_manager owns the mission (explore / clean / navigate / manual) and
+   reports on /robot_mode; frontier_explorer exists only during explore and
+   clean. Every set_mode / explorer command below starts from a click -
+   nothing is sent on load or reconnect.                                    */
+const EXPLORER_ALIVE = ['explore', 'clean', 'recovering', 'paused'];
+const LIVE_MAP_MODES = ['explore', 'clean', 'manual'];
+
+function explorerAlive() { return EXPLORER_ALIVE.includes(explorerMode); }
+// True while something other than this page may be driving the robot.
+function missionAutonomous() {
+  return explorerAlive()
+      || (['explore', 'clean'].includes(robotMode.mode) && robotMode.running !== false);
+}
+// During these missions there is no map_server: /map is slam_toolbox's and
+// (while exploring) it grows, so the page has to read it live.
+function liveMapWanted() {
+  return explorerAlive()
+      || (LIVE_MAP_MODES.includes(robotMode.mode) && robotMode.running !== false);
+}
+
+function renderLinkBanner() {
+  $('linkbanner').hidden = linkUp || !missionAutonomous();
+}
+
+function renderMission() {
+  const mode = robotMode.mode || '–';
+  $('t-mode').textContent = `mode: ${mode}   map: ${robotMode.map || '–'}`;
+  $('mode-detail').textContent = robotMode.detail ? `(${robotMode.detail})` : '';
+  $('d-mode').className = 'dot ' + (robotMode.error ? 'bad'
+      : ['explore', 'clean'].includes(mode) ? 'warn'
+      : ['navigate', 'manual'].includes(mode) ? 'ok' : '');
+  paintDockMode();
+  const err = $('mode-err');
+  err.hidden = !robotMode.error;
+  err.textContent = robotMode.error || '';
+
+  const alive = explorerAlive();
+  $('explorer-row').hidden = !alive;
+  if (alive) {
+    $('t-expl').textContent = explorerMode;
+    $('d-expl').className = 'dot ' + (explorerMode === 'paused' ? ''
+        : explorerMode === 'recovering' ? 'bad' : 'warn');
+    $('x-pause').disabled = explorerMode === 'paused';
+    $('x-resume').disabled = explorerMode !== 'paused';
+  }
+  renderLinkBanner();
+}
+
+function renderExplorerStatus() {
+  const s = explorerStatus || {};
+  const n = v => (v === undefined || v === null ? 0 : v);
+  const cov = Math.max(0, Math.min(1, +n(s.coverage)));
+  $('cov-bar').style.width = (cov * 100).toFixed(0) + '%';
+  $('cov-pct').textContent = (cov * 100).toFixed(0) + '%';
+  const parts = [
+    `${n(s.blocks_done)}/${n(s.blocks_total)} blocks (skipped ${n(s.blocks_skipped)})`,
+    `crashes ${n(s.crashes)}`, `recoveries ${n(s.recoveries)}`,
+    `mapping ${s.mapping || '?'}`,
+  ];
+  if (s.stall) parts.push(`stall ${s.stall}`);
+  $('x-status').textContent = parts.join(' · ');
+  const ages = $('x-ages');
+  ages.textContent = '';
+  for (const [k, v] of [['scan', s.scan_age_s], ['pose', s.pose_age_s]]) {
+    if (v === undefined || v === null) continue;
+    const sp = document.createElement('span');
+    sp.textContent = ` · ${k} ${(+v).toFixed(1)}s`;
+    if (+v > 1.0) sp.className = 'bad-age';   // sensor or localization is stale
+    ages.appendChild(sp);
+  }
+}
+
+// ---- saved maps (nexva_explore map library, via /api/maps) ----
+let mapsFailed = false;
+function savedAtMs(m) {
+  const v = m.saved_at;
+  if (v === undefined || v === null || v === '') return NaN;
+  if (typeof v === 'number') return v > 1e12 ? v : v * 1000;
+  const d = Date.parse(v);
+  if (!isNaN(d)) return d;
+  const f = parseFloat(v);
+  return isFinite(f) ? (f > 1e12 ? f : f * 1000) : NaN;
+}
+function fmtSavedAt(m) {
+  const ms = savedAtMs(m);
+  return isNaN(ms) ? String(m.saved_at || '') : new Date(ms).toLocaleString();
+}
+// newest first, so prompts can prefill the most recent map
+function sortedMaps() {
+  return savedMaps.slice().sort((a, b) => (savedAtMs(b) || 0) - (savedAtMs(a) || 0));
+}
+
+async function loadMaps() {
+  try {
+    const r = await fetch('/api/maps');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('maps ' + r.status));
+    savedMaps = d.maps || [];
+    mapsFailed = false;
+    renderMaps();
+  } catch (e) {
+    if (!mapsFailed) log('saved maps: ' + e.message, 'err');
+    mapsFailed = true;
+    $('maps').textContent = 'map library unavailable — ' + e.message;
+  }
+}
+setInterval(loadMaps, 15000);
+
+function renderMaps() {
+  const box = $('maps');
+  box.innerHTML = '';
+  if (!savedMaps.length) {
+    box.textContent = 'no saved maps yet — run EXPLORE to make one';
+    return;
+  }
+  for (const m of sortedMaps()) {
+    const row = document.createElement('div');
+    row.className = 'maprow';
+    const name = document.createElement('b');
+    name.textContent = m.name;
+    if (m.can_serve === false) {
+      name.style.color = 'var(--muted)';
+      name.title = 'incomplete — cannot be served';
+    }
+    row.appendChild(name);
+    if (m.can_resume) {
+      const star = document.createElement('span');
+      star.className = 'star'; star.textContent = '*';
+      star.title = 'has a pose graph — best for cleaning';
+      row.appendChild(star);
+    }
+    const badge = document.createElement('span');
+    badge.className = 'badge'; badge.textContent = m.origin || '?';
+    row.appendChild(badge);
+    if (m.pose) {
+      const pz = document.createElement('span');
+      pz.className = 'badge';
+      pz.textContent = `pose ${(+m.pose.x).toFixed(1)},${(+m.pose.y).toFixed(1)} ${(+m.pose.yaw_deg).toFixed(0)}°`;
+      pz.title = 'the robot will resume from this pose (saved ' + (m.pose.saved_at || '?') + ')';
+      row.appendChild(pz);
+    }
+    const when = document.createElement('span');
+    when.className = 'sub mono';
+    when.style.cssText = 'flex:1;text-align:right;margin:0;font-size:12px';
+    when.textContent = fmtSavedAt(m);
+    row.appendChild(when);
+    const del = document.createElement('button');
+    del.className = 'small danger'; del.textContent = 'Delete';
+    del.setAttribute('aria-label', 'Delete map ' + m.name);
+    if (m.origin === 'nexva_navigation') {
+      del.disabled = true;
+      del.title = 'bundled map in the source tree - cannot be deleted here';
+    } else {
+      del.title = 'delete this saved map';
+      del.onclick = () => confirmDelete(m);
+    }
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+
+// ---- mission buttons ----
+function setMode(mode, map, isNew) {
+  log(`mission → ${mode}${map ? ' "' + map + '"' : ''}`, mode === 'stop' ? 'err' : undefined);
+  send({cmd: 'set_mode', mode, map: map || '', new: !!isNew});
+}
+function noMaps(what) {
+  log(`${what}: no saved maps — run EXPLORE first`, 'err');
+  $('mode-err').hidden = false;
+  $('mode-err').textContent = 'no saved maps — run EXPLORE first';
+}
+/* ---- in-page modal ----------------------------------------------------
+   One overlay, re-rendered per use. Escape and a backdrop click close it
+   (and Escape must NOT fall through to the global E-stop handler); Tab is
+   kept inside; focus returns to whatever opened it.                        */
+const modalBack = $('modal-back'), modalBox = $('modal'), modalBody = $('modal-body');
+let modalReturn = null;
+function modalOpen() { return !modalBack.hidden; }
+function closeModal() {
+  if (!modalOpen()) return;
+  modalBack.hidden = true;
+  modalBody.innerHTML = '';
+  const r = modalReturn; modalReturn = null;
+  if (r && r.focus && document.contains(r)) r.focus();
+}
+function showModal(title, build) {
+  if (!modalOpen()) modalReturn = document.activeElement;
+  $('modal-title').textContent = title;
+  modalBody.innerHTML = '';
+  const first = build(modalBody);   // returns the element to focus
+  modalBack.hidden = false;
+  (first || modalBox).focus();
+}
+function mEl(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function mActions(body, ...btns) {
+  const a = mEl('div', 'modal-actions');
+  btns.forEach(b => a.appendChild(b));
+  body.appendChild(a);
+}
+function cancelBtn() {
+  const c = mEl('button', null, 'Cancel');
+  c.onclick = closeModal;
+  return c;
+}
+modalBack.addEventListener('mousedown', e => { if (e.target === modalBack) closeModal(); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { log('STOP (Esc)', 'err'); send({cmd: 'estop'}); }
+  if (!modalOpen()) return;
+  if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeModal(); }
+  else if (e.key === 'Tab') {
+    const f = Array.from(modalBox.querySelectorAll('button:not(:disabled), input'));
+    if (!f.length) return;
+    const i = f.indexOf(document.activeElement);
+    if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+  }
+}, true);   // capture: runs before the page's own Esc = E-stop handler
+
+function mapButton(m, onPick) {
+  const b = mEl('button', 'mapbtn');
+  b.appendChild(mEl('b', null, m.name));
+  if (m.can_resume) {
+    const star = mEl('span', 'star', '*');
+    star.title = 'has a pose graph — best for cleaning';
+    b.appendChild(star);
+  }
+  b.appendChild(mEl('span', 'badge', m.origin || '?'));
+  b.appendChild(mEl('span', 'when mono', fmtSavedAt(m)));
+  if (m.can_serve === false) { b.disabled = true; b.title = 'incomplete — cannot be served'; }
+  b.onclick = () => onPick(m.name);
+  return b;
+}
+// Pick a saved map by clicking it. extra(body) may add more choices.
+function pickMapModal(title, hint, onPick, extra) {
+  showModal(title, body => {
+    let first = null;
+    body.appendChild(mEl('div', 'sub', hint));
+    if (!savedMaps.length) {
+      body.appendChild(mEl('div', 'warnline',
+        'No saved maps yet. Run EXPLORE first to build and save one.'));
+    } else {
+      const list = mEl('div', 'modal-list');
+      for (const m of sortedMaps()) {
+        const b = mapButton(m, name => { closeModal(); onPick(name); });
+        if (!first && !b.disabled) first = b;
+        list.appendChild(b);
+      }
+      body.appendChild(list);
+    }
+    const acts = [];
+    if (extra) acts.push(...extra(body));
+    const c = cancelBtn();
+    acts.push(c);
+    mActions(body, ...acts);
+    return first || c;
+  });
+}
+// Text entry for a NEW map name, warning in-modal on a collision.
+function newNameModal(title, mode) {
+  showModal(title, body => {
+    body.appendChild(mEl('div', 'sub', 'Name for the NEW map (letters, numbers, space, - _):'));
+    const inp = mEl('input'); inp.type = 'text'; inp.maxLength = 64;
+    inp.setAttribute('aria-label', 'new map name');
+    body.appendChild(inp);
+    const msg = mEl('div', 'warnline'); body.appendChild(msg);
+    const go = mEl('button', 'primary', 'Start');
+    const check = () => {
+      const n = inp.value.trim();
+      const ok = /^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$/.test(n) && n.indexOf('.as_mapped') < 0;
+      const clash = savedMaps.some(m => m.name === n);
+      go.disabled = !ok;
+      go.textContent = clash ? 'Replace and start' : 'Start';
+      msg.className = n && !ok ? 'badline' : 'warnline';
+      msg.textContent = !n ? '' : !ok ? 'Use letters, numbers, spaces, dashes and underscores only.'
+        : clash ? `"${n}" already exists - starting will REPLACE it.` : '';
+    };
+    const submit = () => {
+      if (go.disabled) return;
+      const n = inp.value.trim();
+      const clash = savedMaps.some(m => m.name === n);
+      closeModal();
+      setMode(mode, n, mode === 'manual' ? true : clash);
+    };
+    inp.oninput = check;
+    inp.onkeydown = e => { if (e.key === 'Enter') submit(); };
+    go.onclick = submit;
+    check();
+    mActions(body, cancelBtn(), go);
+    return inp;
+  });
+}
+$('m-explore').onclick = () => newNameModal('Explore: new map', 'explore');
+$('m-clean').onclick = () =>
+  pickMapModal('Clean which map?', 'Click a map to start cleaning it.',
+               name => setMode('clean', name, false));
+$('m-navigate').onclick = () =>
+  pickMapModal('Navigate on which map?', 'Click a map to navigate on it.',
+               name => setMode('navigate', name, false));
+$('m-manual').onclick = () =>
+  pickMapModal('Manual drive: which map?',
+               'Click a saved map to drive on, or choose another option.',
+               name => setMode('manual', name, false),
+               () => {
+                 const none = mEl('button', null, 'No map');
+                 none.onclick = () => { closeModal(); setMode('manual', '', false); };
+                 const fresh = mEl('button', 'primary', 'Build NEW map…');
+                 fresh.onclick = () => newNameModal('Manual: new map', 'manual');
+                 return [none, fresh];
+               });
+
+// ---- delete a saved map ----
+function confirmDelete(m) {
+  const mode = robotMode && robotMode.mode;
+  const mine = mode && robotMode.map === m.name && !['idle', 'stop'].includes(mode);
+  showModal('Delete map?', body => {
+    body.appendChild(mEl('div', null, `Delete saved map "${m.name}" and its pose graph and backups?`));
+    body.appendChild(mEl('div', 'badline', 'This cannot be undone.'));
+    if (mine) body.appendChild(mEl('div', 'warnline',
+      `A ${mode} mission is using this map - the robot will refuse; stop the mission first.`));
+    else if (!mode) body.appendChild(mEl('div', 'warnline',
+      'Cannot tell whether a mission is using this map (no mission state received).'));
+    const del = mEl('button', 'danger', 'Delete');
+    del.onclick = () => {
+      closeModal();
+      log(`deleting map "${m.name}"…`);
+      send({cmd: 'delete_map', name: m.name});
+    };
+    const c = cancelBtn();
+    mActions(body, c, del);
+    return c;   // default focus on the safe choice
+  });
+}
+$('m-save').onclick = () => {
+  const def = robotMode.map || (savedMaps.length ? sortedMaps()[0].name : '');
+  const raw = prompt('Save the current map and robot pose as:', def);
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!name) { log('save map: a name is needed', 'err'); return; }
+  const exists = savedMaps.some(m => m.name === name);
+  if (exists && name !== robotMode.map
+      && !confirm(`"${name}" already exists. Overwrite it?`)) return;
+  log(`saving map "${name}"…`);
+  send({cmd: 'save_map', name});
+};
+$('m-stop').onclick = () => setMode('stop', '', false);
+$('x-pause').onclick = () => { log('explorer: pause'); send({cmd: 'explorer', command: 'pause'}); };
+$('x-resume').onclick = () => { log('explorer: resume'); send({cmd: 'explorer', command: 'resume'}); };
+
+$('stop').onclick = $('stop-dock').onclick = () => { log('STOP', 'err'); send({cmd: 'estop'}); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !modalOpen()) { log('STOP (Esc)', 'err'); send({cmd: 'estop'}); }
 });
+
+/* ---- vacuum zone --------------------------------------------------------
+   The canvas shows the occupancy map at its native pixel size. A drag gives
+   two corners in canvas pixels; those convert to map metres with the map's own
+   resolution and origin, and go to zone_coverage as a 4-point polygon.
+
+   The .pgm has row 0 at the TOP, while map origin is the BOTTOM-left corner,
+   so the y axis is flipped in the conversion. Getting that backwards mirrors
+   every zone about the middle of the room.                                   */
+const mapc = $('mapcanvas'), mapctx = mapc.getContext('2d');
+// mapMeta/mapImg describe whichever map is on the canvas right now - the
+// PNG from map_server or the live /map grid - so toPx/toMap follow it.
+let mapMeta = null, mapImg = null;
+let dragging = false, dragA = null, dragB = null, zonePts = null;
+
+// One canvas mode at a time: the same gesture cannot mean two things.
+//   null     drag draws the cleaning zone (the default)
+//   'pose'   drag = where the robot is + the way it faces     -> set_pose
+//   'goal'   drag = where to drive + the way to face there    -> goto_pose
+//   'queue'  click = drop a numbered stop (drag = with a heading); Run sends
+//            them all through Nav2's waypoint follower         -> tour_points
+// Arming one disarms the others, and every button is also its own Cancel.
+let canvasMode = null;
+const MODES = {
+  pose:  {btn: 'pose-pick',  info: 'poseinfo',  label: 'Set 2D pose',  cls: null,
+          color: '#f59e0b',
+          idle: 'tell the robot where it is by pointing at the map ' +
+                '(works while NAVIGATE or CLEAN is running, not while exploring)',
+          armed: 'drag on the map: start where the robot is, drag the way it faces'},
+  goal:  {btn: 'goal-pick',  info: 'goalinfo',  label: 'Send goal',    cls: 'goal',
+          color: '#a855f7',
+          idle: 'drive to a spot: drag from the target the way it should face',
+          armed: 'drag on the map: start at the target, drag the way it should face there'},
+  queue: {btn: 'queue-pick', info: 'queueinfo', label: 'Queue points', cls: 'queue',
+          color: '#0891b2', idle: null,
+          armed: 'click to drop a numbered stop (drag to also set its heading)'},
+};
+// A drag shorter than this, on screen, is a click. Measured in CSS pixels, not
+// canvas pixels: the canvas is scaled to the page, so a fixed canvas length
+// is a different finger distance on every map and phone.
+const MIN_DRAG_CSS_PX = 12;
+let queuePts = [], queueActive = -1;   // [{x, y, yaw|null}], stop being driven to
+let goalMark = null;                   // {x, y, yaw} of the goal in flight
+
+function setCanvasMode(mode) {
+  if (!MODES[mode]) mode = null;
+  canvasMode = mode;
+  dragging = false; dragA = dragB = null;
+  for (const [k, d] of Object.entries(MODES)) {
+    const on = k === mode, btn = $(d.btn);
+    btn.classList.toggle('primary', on);
+    if (d.cls) btn.classList.toggle(d.cls, on);
+    btn.textContent = on ? 'Cancel' : d.label;
+    if (k === 'queue') renderQueueInfo();
+    else setInfo(d.info, on ? d.armed : d.idle);
+  }
+  mapc.style.cursor = mode ? 'cell' : 'crosshair';
+  if (mode === 'pose' && (explorerAlive() || robotMode.mode === 'explore')) {
+    // AMCL does not exist during an explore mission; say so now rather than
+    // after the drag. Still armed: the server is the authority on this.
+    setInfo('poseinfo', 'exploring: AMCL is not running, so this will be ' +
+            'refused. Set 2D pose works while NAVIGATE or CLEAN is running.', true);
+  }
+  drawMap();
+}
+function setPoseMode(on) { setCanvasMode(on ? 'pose' : null); }
+
+$('pose-pick').onclick = () => setCanvasMode(canvasMode === 'pose' ? null : 'pose');
+$('goal-pick').onclick = () => setCanvasMode(canvasMode === 'goal' ? null : 'goal');
+$('queue-pick').onclick = () => setCanvasMode(canvasMode === 'queue' ? null : 'queue');
+
+let queueErrUntil = 0;     // keep a server refusal on screen for a few seconds
+function renderQueueInfo() {
+  const n = queuePts.length;
+  $('queue-run').disabled = n === 0;
+  $('queue-clear').disabled = n === 0;
+  if (Date.now() < queueErrUntil) return;   // a state event must not erase the reason
+  let t, warn = false;
+  if (canvasMode === 'queue') {
+    t = MODES.queue.armed + (n ? ` - ${n} so far` : '');
+  } else if (n) {
+    t = `${n} stop${n === 1 ? '' : 's'} queued`;
+  } else {
+    t = 'click the map to drop numbered stops, then Run';
+  }
+  if (n && state.follow_ready === false) {
+    t += ' - Nav2 waypoint follower is not running (start NAVIGATE)';
+    warn = true;
+  }
+  setInfo('queueinfo', t, warn);
+}
+
+$('queue-clear').onclick = () => {
+  queueErrUntil = 0;
+  queuePts = []; queueActive = -1;
+  log('queue cleared');
+  renderQueueInfo(); drawMap();
+};
+$('queue-run').onclick = () => {
+  if (!queuePts.length) { log('queue: nothing to run', 'err'); return; }
+  // [x, y] faces the next stop; [x, y, yaw] keeps the heading that was dragged
+  queueErrUntil = 0;
+  const points = queuePts.map(p => p.yaw === null ? [p.x, p.y] : [p.x, p.y, p.yaw]);
+  log(`queue: running ${points.length} stop${points.length === 1 ? '' : 's'}`);
+  setCanvasMode(null);
+  queueActive = -1;
+  send({cmd: 'tour_points', points});
+};
+
+// An error from the server, put next to the control that caused it.
+const CMD_INFO = {set_pose: 'poseinfo', goto_pose: 'goalinfo',
+                  tour_points: 'queueinfo', zone: 'zoneinfo', zone_cmd: 'zoneinfo'};
+function noteCommandError(m) {
+  const id = CMD_INFO[m.cmd];
+  if (id) setInfo(id, m.msg, true);
+  if (m.cmd === 'tour_points') queueErrUntil = Date.now() + 8000;
+  if (m.cmd === 'goto_pose') { goalMark = null; drawMap(); }
+  if (m.cmd === 'zone' && zoneCmdTimer) {          // the follow-up would only fail too
+    clearTimeout(zoneCmdTimer); zoneCmdTimer = null;
+  }
+}
+
+// Zone backend (zone_coverage) presence, from the node's own subscriber count.
+function renderZoneBackend() {
+  const t = $('t-zone');
+  if (state.zone_ready === false) {
+    t.textContent = 'zone_coverage not running';
+    $('d-zone').className = 'dot bad';
+  } else if (state.zone_ready === true && t.textContent === 'zone_coverage not running') {
+    t.textContent = 'idle';
+    $('d-zone').className = 'dot ok';
+  }
+}
+let planPts = [], robotPose = null;   // sweep path + live robot, in map metres
+let covBlocks = [], explorePath = [];  // explorer's coverage squares + route
+let mapSource = null;                  // 'png' | 'live' - which map is wanted
+let liveMapSeq = null, liveMapShownSeq = null, liveMapBusy = false;
+
+// map metres -> canvas pixel (inverse of toMap)
+function toPx(x, y) {
+  return {
+    x: (x - mapMeta.origin[0]) / mapMeta.resolution,
+    y: mapMeta.height - (y - mapMeta.origin[1]) / mapMeta.resolution,
+  };
+}
+
+async function loadPlan() {
+  try {
+    const r = await fetch('/api/plan');
+    const d = await r.json();
+    planPts = d.points || [];
+    log(`plan: ${planPts.length} points`);
+    drawMap();
+  } catch (e) { log('could not fetch plan', 'err'); }
+}
+
+// HTTP fetches triggered by 1 Hz events: at most one in flight per key and
+// at least minGap between them, but the last trigger is never dropped.
+const fetchTimers = {};
+function scheduleFetch(key, fn, minGap) {
+  const t = fetchTimers[key] || (fetchTimers[key] = {last: 0, timer: null});
+  if (t.timer) return;
+  const wait = Math.max(0, t.last + minGap - Date.now());
+  t.timer = setTimeout(() => { t.timer = null; t.last = Date.now(); fn(); }, wait);
+}
+async function loadCoverage() {
+  try {
+    const r = await fetch('/api/coverage');
+    const d = await r.json();
+    covBlocks = d.blocks || [];
+    drawMap();
+  } catch (e) { /* next event retries */ }
+}
+async function loadExplorePath() {
+  try {
+    const r = await fetch('/api/explore_path');
+    const d = await r.json();
+    explorePath = d.points || [];
+    drawMap();
+  } catch (e) { /* next event retries */ }
+}
+
+async function loadMap() {
+  try {
+    const r = await fetch('/api/map_meta');
+    if (!r.ok) throw new Error('map_meta ' + r.status);
+    const meta = await r.json();
+    const img = await new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im); im.onerror = rej;
+      im.src = '/api/map.png?' + Date.now();
+    });
+    if (mapSource !== 'png') return;   // a mission started meanwhile
+    mapMeta = meta; mapImg = img;
+    mapc.width = mapMeta.width; mapc.height = mapMeta.height;
+    $('maphint').hidden = true;
+    $('map-source').textContent = 'map: ' + mapMeta.name;
+    drawMap();
+    log(`map "${mapMeta.name}" ${mapMeta.width}x${mapMeta.height} @ ${mapMeta.resolution} m`);
+  } catch (e) {
+    if (mapSource !== 'png') return;
+    if (!mapImg) $('maphint').textContent = 'map not available — is map_server running?';
+    // map_server may be absent or mismatched while /map itself is fine
+    // (it is latched from whoever published it): fall back to the live grid.
+    loadLiveMap(true);
+  }
+}
+
+/* ---- live map -----------------------------------------------------------
+   /api/live_map is the latest /map OccupancyGrid, run-length encoded as
+   <count><u|o|f> runs. Row 0 of the grid is the BOTTOM of the map, so rows
+   are flipped on the way into the canvas, which keeps toPx/toMap unchanged. */
+function rleToCanvas(m) {
+  const cv = document.createElement('canvas');
+  cv.width = m.width; cv.height = m.height;
+  const g = cv.getContext('2d');
+  const img = g.createImageData(m.width, m.height), d = img.data;
+  const rle = m.rle || '', n = m.width * m.height;
+  let i = 0, k = 0, num = '';
+  while (i < rle.length && k < n) {
+    const c = rle[i++];
+    if (c >= '0' && c <= '9') { num += c; continue; }
+    const run = parseInt(num || '1', 10); num = '';
+    const v = c === 'o' ? 30 : (c === 'f' ? 235 : 105);
+    for (let j = 0; j < run && k < n; j++, k++) {
+      const row = (k / m.width) | 0, col = k - row * m.width;
+      const p = ((m.height - 1 - row) * m.width + col) * 4;
+      d[p] = d[p + 1] = d[p + 2] = v; d[p + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+
+async function loadLiveMap(force) {
+  if (liveMapBusy) return;
+  // skip the fetch when the node has told us nothing changed
+  if (!force && liveMapSeq !== null && liveMapSeq === liveMapShownSeq) return;
+  liveMapBusy = true;
+  try {
+    const r = await fetch('/api/live_map');
+    if (r.status === 503) {
+      if (!mapImg) $('maphint').textContent = 'waiting for /map…';
+      return;
+    }
+    if (!r.ok) throw new Error('live_map ' + r.status);
+    const m = await r.json();
+    if (mapSource !== 'live' && !force) return;
+    if (m.seq === liveMapShownSeq) return;
+    mapImg = rleToCanvas(m);
+    mapMeta = {width: m.width, height: m.height, resolution: m.resolution,
+               origin: m.origin, name: 'live'};
+    if (mapc.width !== m.width || mapc.height !== m.height) {
+      mapc.width = m.width; mapc.height = m.height;
+    }
+    liveMapShownSeq = m.seq; liveMapSeq = m.seq;
+    $('maphint').hidden = true;
+    $('map-source').textContent = `live /map ${m.width}x${m.height} @ ${m.resolution} m`;
+    drawMap();
+  } catch (e) {
+    if (!mapImg) $('maphint').textContent = 'live map not available';
+  } finally {
+    liveMapBusy = false;
+  }
+}
+setInterval(() => { if (mapSource === 'live') loadLiveMap(false); }, 2000);
+
+// PNG from map_server while navigating / idle; live grid during missions.
+function refreshMapSource() {
+  const want = liveMapWanted() ? 'live' : 'png';
+  if (want === mapSource) return;
+  mapSource = want;
+  if (want === 'live') { liveMapShownSeq = null; loadLiveMap(true); }
+  else loadMap();
+}
+
+function drawMap() {
+  if (!mapImg) return;
+  // set every draw: resizing the canvas resets the context to defaults
+  mapctx.imageSmoothingEnabled = false;
+  mapctx.clearRect(0, 0, mapc.width, mapc.height);
+  mapctx.drawImage(mapImg, 0, 0);
+
+  // explorer coverage squares, coloured exactly as the robot reported them;
+  // a red (to do) square that is partly swept gets that much green on top.
+  if (covBlocks.length) {
+    const COV = {g: 'rgba(40,200,90,0.40)', b: 'rgba(40,120,255,0.55)',
+                 x: 'rgba(150,150,160,0.30)', r: 'rgba(230,60,40,0.28)'};
+    for (const c of covBlocks) {
+      const tl = toPx(c.x - c.size / 2, c.y + c.size / 2);
+      const px = c.size / mapMeta.resolution;
+      mapctx.fillStyle = COV[c.s] || COV.r;
+      mapctx.fillRect(tl.x, tl.y, px, px);
+      if (c.s === 'r' && c.f > 0) {
+        mapctx.fillStyle = `rgba(40,200,90,${(0.40 * c.f).toFixed(2)})`;
+        mapctx.fillRect(tl.x, tl.y, px, px);
+      }
+    }
+  }
+
+  // planned sweep. Drawn as one polyline: the long diagonals are the
+  // transits between rows, not routes through walls - Nav2 drives around
+  // obstacles on those.
+  if (planPts.length > 1) {
+    mapctx.strokeStyle = 'rgba(22,163,74,0.9)';
+    mapctx.lineWidth = Math.max(0.6, mapc.width / 500);
+    mapctx.beginPath();
+    planPts.forEach((p, i) => {
+      const q = toPx(p[0], p[1]);
+      i ? mapctx.lineTo(q.x, q.y) : mapctx.moveTo(q.x, q.y);
+    });
+    mapctx.stroke();
+    // start and end, so the direction of the sweep is readable
+    const a = toPx(planPts[0][0], planPts[0][1]);
+    const b = toPx(planPts[planPts.length - 1][0], planPts[planPts.length - 1][1]);
+    mapctx.fillStyle = '#16a34a';
+    mapctx.beginPath(); mapctx.arc(a.x, a.y, 3, 0, 6.283); mapctx.fill();
+    mapctx.fillStyle = '#dc2626';
+    mapctx.beginPath(); mapctx.arc(b.x, b.y, 3, 0, 6.283); mapctx.fill();
+  }
+
+  // explorer's current route, with a dot on where it is heading
+  if (explorePath.length) {
+    mapctx.strokeStyle = '#ffd23f';
+    mapctx.lineWidth = 2;
+    mapctx.beginPath();
+    explorePath.forEach((p, i) => {
+      const q = toPx(p[0], p[1]);
+      i ? mapctx.lineTo(q.x, q.y) : mapctx.moveTo(q.x, q.y);
+    });
+    mapctx.stroke();
+    const last = explorePath[explorePath.length - 1];
+    const e = toPx(last[0], last[1]);
+    mapctx.fillStyle = '#ffd23f';
+    mapctx.beginPath(); mapctx.arc(e.x, e.y, 5, 0, 6.283); mapctx.fill();
+  }
+
+  // live robot: a dot with a heading tick
+  if (robotPose) {
+    const r = toPx(robotPose.x, robotPose.y);
+    const yaw = -robotPose.yaw * Math.PI / 180;   // canvas y is flipped
+    mapctx.strokeStyle = '#2563eb';
+    mapctx.fillStyle = '#2563eb';
+    mapctx.lineWidth = Math.max(1, mapc.width / 350);
+    mapctx.beginPath(); mapctx.arc(r.x, r.y, 4, 0, 6.283); mapctx.fill();
+    mapctx.beginPath();
+    mapctx.moveTo(r.x, r.y);
+    mapctx.lineTo(r.x + 9 * Math.cos(yaw), r.y + 9 * Math.sin(yaw));
+    mapctx.stroke();
+  }
+
+  // queued stops: numbered dots joined in order, a heading tick where one was
+  // dragged, and the stop currently being driven to filled solid.
+  if (queuePts.length) {
+    const col = MODES.queue.color, r = Math.max(5, mapc.width / 90);
+    mapctx.strokeStyle = col;
+    mapctx.lineWidth = Math.max(1, mapc.width / 400);
+    mapctx.setLineDash([r, r]);
+    mapctx.beginPath();
+    queuePts.forEach((p, i) => {
+      const q = toPx(p.x, p.y);
+      i ? mapctx.lineTo(q.x, q.y) : mapctx.moveTo(q.x, q.y);
+    });
+    mapctx.stroke();
+    mapctx.setLineDash([]);
+    queuePts.forEach((p, i) => {
+      const q = toPx(p.x, p.y);
+      if (p.yaw !== null) {
+        const t = -p.yaw;                     // canvas y is flipped
+        mapctx.beginPath();
+        mapctx.moveTo(q.x, q.y);
+        mapctx.lineTo(q.x + r * 2 * Math.cos(t), q.y + r * 2 * Math.sin(t));
+        mapctx.lineWidth = Math.max(1.5, mapc.width / 260);
+        mapctx.stroke();
+      }
+      const on = i === queueActive;
+      mapctx.beginPath(); mapctx.arc(q.x, q.y, r, 0, 6.283);
+      mapctx.fillStyle = on ? col : '#ffffff'; mapctx.fill();
+      mapctx.lineWidth = Math.max(1.5, mapc.width / 300);
+      mapctx.strokeStyle = col; mapctx.stroke();
+      mapctx.fillStyle = on ? '#ffffff' : col;
+      mapctx.font = `bold ${Math.round(r * 1.5)}px system-ui, sans-serif`;
+      mapctx.textAlign = 'center'; mapctx.textBaseline = 'middle';
+      mapctx.fillText(String(i + 1), q.x, q.y + 0.5);
+    });
+  }
+
+  // the goal in flight
+  if (goalMark) {
+    const q = toPx(goalMark.x, goalMark.y), r = Math.max(5, mapc.width / 90);
+    const t = -goalMark.yaw;
+    mapctx.strokeStyle = mapctx.fillStyle = MODES.goal.color;
+    mapctx.lineWidth = Math.max(1.5, mapc.width / 260);
+    mapctx.beginPath(); mapctx.arc(q.x, q.y, r, 0, 6.283); mapctx.stroke();
+    mapctx.beginPath(); mapctx.arc(q.x, q.y, r / 2.5, 0, 6.283); mapctx.fill();
+    mapctx.beginPath();
+    mapctx.moveTo(q.x, q.y);
+    mapctx.lineTo(q.x + r * 2.2 * Math.cos(t), q.y + r * 2.2 * Math.sin(t));
+    mapctx.stroke();
+  }
+
+  if (dragA && dragB && canvasMode) {
+    // An arrow from where the thing is to the way it faces, so the heading
+    // being chosen is visible before it is committed. Each mode has its own
+    // colour, so which gesture is armed is readable on the canvas itself.
+    const col = MODES[canvasMode].color;
+    const lw = Math.max(1, mapc.width / 260);
+    mapctx.strokeStyle = col;
+    mapctx.fillStyle = col;
+    mapctx.lineWidth = lw;
+    const moved = Math.hypot(dragB.x - dragA.x, dragB.y - dragA.y) > 1;
+    if (moved) {
+      mapctx.beginPath();
+      mapctx.moveTo(dragA.x, dragA.y);
+      mapctx.lineTo(dragB.x, dragB.y);
+      mapctx.stroke();
+
+      const a = Math.atan2(dragB.y - dragA.y, dragB.x - dragA.x);
+      const head = Math.max(6, mapc.width / 45);
+      mapctx.beginPath();
+      mapctx.moveTo(dragB.x, dragB.y);
+      mapctx.lineTo(dragB.x - head * Math.cos(a - 0.4),
+                    dragB.y - head * Math.sin(a - 0.4));
+      mapctx.lineTo(dragB.x - head * Math.cos(a + 0.4),
+                    dragB.y - head * Math.sin(a + 0.4));
+      mapctx.closePath();
+      mapctx.fill();
+    }
+    mapctx.beginPath();
+    mapctx.arc(dragA.x, dragA.y, lw * 2.5, 0, Math.PI * 2);
+    mapctx.fill();
+  } else if (dragA && dragB) {
+    const x = Math.min(dragA.x, dragB.x), y = Math.min(dragA.y, dragB.y);
+    const w = Math.abs(dragB.x - dragA.x), h = Math.abs(dragB.y - dragA.y);
+    mapctx.fillStyle = 'rgba(37,99,235,0.25)';
+    mapctx.fillRect(x, y, w, h);
+    mapctx.strokeStyle = '#2563eb';
+    mapctx.lineWidth = Math.max(1, mapc.width / 300);
+    mapctx.strokeRect(x, y, w, h);
+  }
+}
+
+function canvasPt(ev) {
+  const r = mapc.getBoundingClientRect();
+  // A hidden tab has no geometry, so this would divide by zero and hand back
+  // Infinity - which would go out as a pose or a zone somewhere in orbit.
+  // null, so the caller has to notice rather than act on a made-up point.
+  if (!r.width || !r.height) return null;
+  return {
+    x: (ev.clientX - r.left) * (mapc.width / r.width),
+    y: (ev.clientY - r.top) * (mapc.height / r.height),
+  };
+}
+
+// Length of a drag as the finger sees it (CSS pixels), whatever the canvas
+// is scaled to.
+function cssLen(a, b) {
+  const r = mapc.getBoundingClientRect();
+  const k = r.width && mapc.width ? r.width / mapc.width : 1;
+  return Math.hypot(b.x - a.x, b.y - a.y) * k;
+}
+
+// canvas pixel -> map metres (canvas row 0 is the top; origin is bottom-left)
+function toMap(p) {
+  return [
+    mapMeta.origin[0] + p.x * mapMeta.resolution,
+    mapMeta.origin[1] + (mapMeta.height - p.y) * mapMeta.resolution,
+  ];
+}
+
+// Said both on the page (next to the armed control) and in the log, so a
+// gesture that is refused is never silent.
+function gestureNote(text) {
+  log(text, 'err');
+  if (canvasMode) setInfo(MODES[canvasMode].info, text, true);
+}
+
+mapc.addEventListener('pointerdown', e => {
+  if (!mapMeta) {
+    if (canvasMode) gestureNote('no map is on the canvas yet - wait for it to load, then try again');
+    return;
+  }
+  const p = canvasPt(e);
+  if (!p) {
+    gestureNote('the map has no size on screen right now - switch back to the Control tab and try again');
+    return;
+  }
+  dragging = true;
+  try { mapc.setPointerCapture(e.pointerId); } catch (err) { /* pointer already gone */ }
+  dragA = dragB = p; drawMap();
+});
+mapc.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const p = canvasPt(e);
+  if (p) { dragB = p; drawMap(); }
+});
+// A cancelled pointer is the browser taking the gesture away (a scroll or a
+// system gesture on a phone), not the person letting go. Committing a
+// half-finished drag would send a pose nobody chose.
+mapc.addEventListener('pointercancel', () => {
+  if (!dragging) return;
+  dragging = false; dragA = dragB = null; drawMap();
+  if (canvasMode) gestureNote('the browser cancelled that drag - nothing sent, try again');
+});
+mapc.addEventListener('pointerup', e => {
+  if (!dragging) return;
+  dragging = false;
+  const p = canvasPt(e);          // where the finger actually lifted
+  if (p) dragB = p;
+  finishGesture();
+});
+
+function finishGesture() {
+  const a = dragA, b = dragB;
+  if (!a || !b) { dragA = dragB = null; drawMap(); return; }
+  const len = cssLen(a, b);
+  const from = toMap(a), to = toMap(b);
+  const yaw = Math.atan2(to[1] - from[1], to[0] - from[0]);
+  const deg = (yaw * 180 / Math.PI).toFixed(0);
+  const at = `${from[0].toFixed(2)}, ${from[1].toFixed(2)}`;
+
+  // Pose and goal own the whole gesture: drag from the spot, in the direction
+  // it faces. One drag, both numbers - the same motion RViz uses.
+  if (canvasMode === 'pose' || canvasMode === 'goal') {
+    dragA = dragB = null;
+    const mode = canvasMode, what = mode === 'pose' ? 'set 2D pose' : 'send goal';
+    if (len < MIN_DRAG_CSS_PX) {
+      // Too short to read a direction from, and guessing one would point the
+      // robot somewhere the operator never chose.
+      gestureNote(`${what}: drag was too short (${len.toFixed(0)} px, need ` +
+                  `${MIN_DRAG_CSS_PX}) - drag further, the length sets which way it faces. Nothing sent.`);
+      drawMap();
+      return;
+    }
+    setCanvasMode(null);
+    log(`${what} at ${at} facing ${deg}° - sending`);
+    if (mode === 'pose') {
+      setInfo('poseinfo', `setting pose ${at} @ ${deg}°…`);
+      send({cmd: 'set_pose', x: from[0], y: from[1], yaw: yaw});
+    } else {
+      goalMark = {x: from[0], y: from[1], yaw: yaw};
+      setInfo('goalinfo', `sending goal ${at} @ ${deg}°…`);
+      send({cmd: 'goto_pose', x: from[0], y: from[1], yaw: yaw});
+    }
+    drawMap();
+    return;
+  }
+
+  // Queue: a click drops a stop; a drag drops one with a heading.
+  if (canvasMode === 'queue') {
+    dragA = dragB = null;
+    if (queuePts.length >= 50) {
+      gestureNote('the queue is full (50 stops) - Run or Clear it first');
+      drawMap();
+      return;
+    }
+    const heading = len >= MIN_DRAG_CSS_PX;
+    queuePts.push({x: from[0], y: from[1], yaw: heading ? yaw : null});
+    queueActive = -1; queueErrUntil = 0;
+    log(`queued stop ${queuePts.length} at ${at}` +
+        (heading ? ` facing ${deg}°` : ' (faces the next stop)'));
+    renderQueueInfo();
+    drawMap();
+    return;
+  }
+
+  const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+  if (w < 4 || h < 4) { dragA = dragB = null; zonePts = null; drawMap(); return; }
+  const x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
+  const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
+  zonePts = [
+    toMap({x: x0, y: y1}), toMap({x: x1, y: y1}),
+    toMap({x: x1, y: y0}), toMap({x: x0, y: y0}),
+  ];
+  const wm = w * mapMeta.resolution, hm = h * mapMeta.resolution;
+  setInfo('zoneinfo',
+    `zone ${wm.toFixed(2)} x ${hm.toFixed(2)} m  (${(wm * hm).toFixed(1)} m²)`);
+  drawMap();
+}
+
+$('zone-clear').onclick = () => {
+  dragA = dragB = zonePts = null; drawMap();
+  setInfo('zoneinfo', 'no zone drawn');
+};
+// The follow-up command waits a moment so the zone lands first. If the zone
+// itself is refused (nothing is listening) the timer is cancelled by
+// noteCommandError - the command would only fail the same way.
+let zoneCmdTimer = null;
+function sendZone(then) {
+  if (!zonePts) { log('draw a zone first', 'err'); return; }
+  send({cmd: 'zone', points: zonePts});
+  if (zoneCmdTimer) clearTimeout(zoneCmdTimer);
+  if (then) zoneCmdTimer = setTimeout(() => {
+    zoneCmdTimer = null;
+    send({cmd: 'zone_cmd', command: then});
+  }, 400);
+}
+$('zone-plan').onclick = () => { log('planning zone - asking the zone backend'); sendZone('plan drawn'); };
+$('zone-start').onclick = () => {
+  if (!confirm('Start cleaning the drawn zone?\n\nThe robot will drive a ' +
+               'perimeter pass and then fill it with rows.')) return;
+  log('zone cleaning requested - waiting for the zone backend to confirm'); sendZone('start drawn');
+};
 
 /* ---- manual drive -------------------------------------------------------
    The node publishes /cmd_vel on its own fixed-rate timer, so this only has
@@ -423,7 +2215,430 @@ document.addEventListener('keyup', e => {
 // Losing focus mid-drive must not leave the robot running.
 window.addEventListener('blur', () => { keys.clear(); driving = false; stopSending(); });
 
+/* ---- tabs ---------------------------------------------------------------
+   Show/hide only. Nothing is unmounted and nothing is rebuilt, so every
+   control, every listener, the WebSocket and the map canvas all survive a
+   switch untouched - which is the whole reason it is done this way rather
+   than by swapping innerHTML.                                              */
+const TABS = ['control', 'diag'];
+let activeTab = 'control';
+
+function showTab(name) {
+  if (!TABS.includes(name)) name = 'control';
+  activeTab = name;
+  for (const t of TABS) {
+    $('page-' + t).hidden = (t !== name);
+    $('tab-' + t).classList.toggle('active', t === name);
+  }
+  // Throws in some privacy modes, where it is not worth losing the tab over.
+  try { localStorage.setItem('nexva.tab', name); } catch (e) { /* ignored */ }
+  if (name === 'control') {
+    // While the tab was hidden the canvas had no laid-out box. Redraw once
+    // it has one again, after layout has run - drawing in the same frame as
+    // the unhide measures the old (zero) geometry.
+    requestAnimationFrame(drawMap);
+  } else {
+    loadHealth();
+    renderRosLog();
+  }
+}
+
+$('tab-control').onclick = () => showTab('control');
+$('tab-diag').onclick = () => showTab('diag');
+
+/* ---- Raspberry Pi health ------------------------------------------------
+   /api/health is a snapshot of /proc, /sys and vcgencmd. Every section
+   carries ok/why, and a section that is not ok renders as "n/a" plus the
+   reason - never as a plausible number. On this x86 dev box vcgencmd does
+   not exist, and that must read as "unavailable", not as "healthy".        */
+const HEALTH_POLL_MS = 2000;
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '–';
+  const u = ['B', 'kB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i];
+}
+
+function fmtUptime(s) {
+  if (s === null || s === undefined) return '';
+  s = Math.floor(s);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function na(el, why) {
+  const e = $(el);
+  e.textContent = 'n/a';
+  e.className = 'na';
+  return why;
+}
+
+function setStat(el, text) { $(el).textContent = text; $(el).className = ''; }
+
+async function loadHealth() {
+  try {
+    const r = await fetch('/api/health');
+    if (!r.ok) throw new Error('health ' + r.status);
+    renderHealth(await r.json());
+  } catch (e) {
+    $('d-health').className = 'dot bad';
+    $('t-health').textContent = 'health unavailable — ' + e.message;
+  }
+}
+setInterval(() => {
+  // Only while the tab is actually being looked at. Polling a hidden page
+  // runs vcgencmd on the robot every two seconds for nobody.
+  if (activeTab === 'diag' && !document.hidden) loadHealth();
+}, HEALTH_POLL_MS);
+
+function renderHealth(h) {
+  if (!h) return;
+  const why = [];
+
+  const cpu = h.cpu || {};
+  if (cpu.ok && cpu.total !== null) setStat('h-cpu', cpu.total.toFixed(0) + '%');
+  else why.push('cpu: ' + (cpu.why || 'unavailable'), na('h-cpu'));
+
+  const clock = cpu.clock || {};
+  if (clock.ok) {
+    setStat('h-clock', clock.mhz + (clock.max_mhz ? ' / ' + clock.max_mhz : ''));
+  } else why.push('clock: ' + (clock.why || 'unavailable'), na('h-clock'));
+
+  const load = cpu.load || {};
+  if (load.ok) setStat('h-load', load.avg[0].toFixed(2));
+  else why.push('load: ' + (load.why || 'unavailable'), na('h-load'));
+
+  const t = h.temperature || {};
+  if (t.ok) setStat('h-temp', t.celsius.toFixed(1) + ' °C');
+  else why.push('temperature: ' + (t.why || 'unavailable'), na('h-temp'));
+
+  const mem = h.memory || {};
+  if (mem.ok) {
+    setStat('h-mem', fmtBytes(mem.used) + ' / ' + fmtBytes(mem.total));
+  } else why.push('memory: ' + (mem.why || 'unavailable'), na('h-mem'));
+
+  const disk = h.disk || {};
+  if (disk.ok) setStat('h-disk', fmtBytes(disk.free));
+  else why.push('disk: ' + (disk.why || 'unavailable'), na('h-disk'));
+
+  // per-core bars: a single core pinned at 100% while the total looks calm
+  // is what a spinning ROS callback looks like, and the average hides it.
+  const box = $('h-cores');
+  box.innerHTML = '';
+  for (const [i, v] of (cpu.per_core || []).entries()) {
+    const d = document.createElement('div');
+    d.className = 'core' + (v >= 90 ? ' max' : v >= 60 ? ' hot' : '');
+    d.innerHTML = '<div class="bar"><i></i></div>';
+    d.querySelector('i').style.width = Math.max(0, Math.min(100, v)) + '%';
+    const label = document.createElement('span');
+    label.textContent = `c${i} ${v === null ? '–' : v.toFixed(0) + '%'}`;
+    d.appendChild(label);
+    box.appendChild(d);
+  }
+
+  const up = h.uptime || {};
+  $('h-uptime').textContent = up.ok
+    ? 'up ' + fmtUptime(up.seconds)
+    : (up.why || 'uptime unavailable');
+
+  renderThrottling(h.throttling || {});
+
+  // One dot for the whole board. Throttling outranks everything: a capped
+  // clock explains symptoms that nothing else on this page will.
+  const thr = h.throttling || {};
+  const bad = (thr.ok && thr.now && thr.now.length)
+            || (t.ok && t.celsius >= 80)
+            || (disk.ok && disk.pct >= 95);
+  const warn = (thr.ok && thr.since_boot && thr.since_boot.length)
+             || (t.ok && t.celsius >= 70) || (mem.ok && mem.pct >= 90)
+             || (disk.ok && disk.pct >= 85) || why.length;
+  $('d-health').className = 'dot ' + (bad ? 'bad' : warn ? 'warn' : 'ok');
+  $('t-health').textContent = h.hostname
+    + (disk.ok ? '  ·  ' + disk.pct + '% disk' : '')
+    + (mem.ok ? '  ·  ' + mem.pct + '% ram' : '');
+  $('h-detail').textContent = why.filter(Boolean).join('   ·   ');
+}
+
+function thrPill(text, cls) {
+  const s = document.createElement('span');
+  s.className = 'pill ' + (cls || '');
+  s.textContent = text;
+  return s;
+}
+
+function renderThrottling(thr) {
+  const now = $('thr-now'), boot = $('thr-boot');
+  now.innerHTML = ''; boot.innerHTML = '';
+  if (!thr.ok) {
+    // The honest answer on anything that is not a Pi. Saying "no throttling"
+    // here would be a lie that reads as good news.
+    now.appendChild(thrPill('throttle state unavailable'));
+    $('thr-raw').textContent = thr.why || '';
+    return;
+  }
+  now.appendChild(thrPill('now:'));
+  if (!thr.now.length) now.appendChild(thrPill('nothing wrong', 'ok'));
+  else for (const w of thr.now) now.appendChild(thrPill(w, 'bad'));
+
+  boot.appendChild(thrPill('since boot:'));
+  if (!thr.since_boot.length) boot.appendChild(thrPill('never', 'ok'));
+  else for (const w of thr.since_boot) boot.appendChild(thrPill(w, 'warn'));
+
+  $('thr-raw').textContent = 'vcgencmd get_throttled = ' + thr.raw;
+}
+
+/* ---- IMU & motion check --------------------------------------------------
+   The bridge sends an `imu` event about twice a second while /imu is flowing,
+   one when it stops, and one when stall_guard changes its mind. Silence has no
+   event of its own, so the page keeps its own clock too: a sample older than
+   IMU_STALE_MS blanks the numbers whether or not the bridge said so (it also
+   covers a dead WebSocket). Nothing stale is ever left on screen as if live. */
+const IMU_STALE_MS = 2500;
+const NO_IMU = 'no IMU data — driver not running or board not wired';
+let imuLast = null, imuAt = 0;
+
+function imuNum(id, v, digits) {
+  const box = $(id + '-box'), ok = typeof v === 'number' && isFinite(v);
+  $(id).textContent = ok ? v.toFixed(digits) : '–';
+  box.classList.toggle('na', !ok);
+}
+
+function paintImu() {
+  const m = imuLast;
+  const live = !!(m && m.fresh && Date.now() - imuAt <= IMU_STALE_MS);
+  if (live) {
+    imuNum('i-ax', m.accel && m.accel[0], 2);
+    imuNum('i-ay', m.accel && m.accel[1], 2);
+    imuNum('i-az', m.accel && m.accel[2], 2);
+    imuNum('i-wz', m.gyro_z, 3);
+    $('d-imu').className = 'dot ok';
+    $('t-imu').textContent = 'receiving /imu';
+    if (m.orientation_valid && m.rpy) {
+      $('i-orient').textContent =
+        `orientation: roll ${m.rpy[0].toFixed(1)}°  pitch ${m.rpy[1].toFixed(1)}°  yaw ${m.rpy[2].toFixed(1)}°`;
+    } else {
+      $('i-orient').textContent =
+        'orientation: accel-only — no heading from this sensor ' +
+        '(orientation_covariance[0] < 0). Acceleration and gyro above are real.';
+    }
+  } else {
+    for (const id of ['i-ax', 'i-ay', 'i-az', 'i-wz']) imuNum(id, null);
+    $('d-imu').className = 'dot bad';
+    // "last seen" only when we did see one on this page
+    const ago = imuAt ? Math.round((Date.now() - imuAt) / 1000) : null;
+    $('t-imu').textContent = NO_IMU + (ago !== null ? ` (last sample ${ago} s ago)` : '');
+    $('i-orient').textContent = '';
+  }
+  $('i-calib').textContent = (m && m.calib) ? 'calibration: ' + m.calib : '';
+
+  const st = (m && m.stall) || {running: false};
+  if (!m || !st.running) {
+    $('d-stall').className = 'dot';
+    $('t-stall').textContent = 'motion check: not running';
+    $('i-stall').textContent = '';
+  } else {
+    $('d-stall').className = 'dot ' + (st.moved ? 'bad' : 'ok');
+    $('t-stall').textContent = st.moved ? 'STALLED' : 'not moved';
+    $('i-stall').textContent = st.status ? 'stall_guard: ' + st.status : '';
+  }
+}
+setInterval(paintImu, 1000);
+
+/* ---- the ROS log --------------------------------------------------------
+   The bridge keeps a ring of /rosout and seeds every new connection with it,
+   so this starts with history rather than with whatever happens next. Rows
+   are appended one at a time; only a filter change rebuilds the list, which
+   keeps a noisy Nav2 from re-rendering hundreds of nodes per second.       */
+const LEVEL_NAME = {10: 'DEBUG', 20: 'INFO ', 30: 'WARN ', 40: 'ERROR',
+                    50: 'FATAL'};
+const LEVEL_CLASS = {10: 'dbg', 20: 'inf', 30: 'wrn', 40: 'err', 50: 'ftl'};
+const ROSLOG_MAX = 500;
+let rosLog = [], rosNodes = [], rlPaused = false;
+
+function clearRosLog() {
+  rosLog = []; rosNodes = [];
+  renderNodeFilter();
+  renderRosLog();
+}
+
+function rlMinLevel() { return parseInt($('rl-level').value, 10) || 20; }
+function rlNode() { return $('rl-node').value; }
+function rlMatches(e) {
+  return e.level >= rlMinLevel() && (!rlNode() || e.name === rlNode());
+}
+
+function rlRow(e) {
+  const d = document.createElement('div');
+  d.className = 'rl ' + (LEVEL_CLASS[e.level] || 'inf');
+  const when = new Date((e.t || 0) * 1000).toLocaleTimeString();
+  d.textContent = `${when}  ${LEVEL_NAME[e.level] || e.level}  ${e.name}  ${e.msg}`;
+  return d;
+}
+
+function appendRows(entries) {
+  const box = $('roslog');
+  const frag = document.createDocumentFragment();
+  let n = 0;
+  for (const e of entries) if (rlMatches(e)) { frag.appendChild(rlRow(e)); n++; }
+  if (n) {
+    box.appendChild(frag);
+    while (box.childElementCount > ROSLOG_MAX) box.firstChild.remove();
+    // Paused means the operator is reading something further up; yanking the
+    // view to the bottom under them is exactly what pause is for.
+    if (!rlPaused) box.scrollTop = box.scrollHeight;
+  }
+  $('rl-count').textContent = `${box.childElementCount} shown · ${rosLog.length} kept`;
+}
+
+function renderRosLog() {       // full rebuild: filter change, or tab shown
+  $('roslog').innerHTML = '';
+  appendRows(rosLog);
+}
+
+function renderNodeFilter() {
+  const sel = $('rl-node'), keep = sel.value;
+  sel.innerHTML = '';
+  const all = document.createElement('option');
+  all.value = ''; all.textContent = 'all nodes';
+  sel.appendChild(all);
+  for (const n of rosNodes.slice().sort()) {
+    const o = document.createElement('option');
+    o.value = o.textContent = n;
+    sel.appendChild(o);
+  }
+  sel.value = keep;             // a repopulate must not reset the filter
+  if (sel.value !== keep) sel.value = '';    // that node is gone
+}
+
+function addLogEntries(items) {
+  if (!items || !items.length) return;
+  const last = rosLog.length ? rosLog[rosLog.length - 1].seq : 0;
+  const fresh = [];
+  let newNode = false;
+  for (const e of items) {
+    // The seed and the live stream overlap by a message or two; seq is
+    // monotonic within one bridge process, so it is what sorts that out.
+    if (e.seq <= last) continue;
+    fresh.push(e);
+    if (!rosNodes.includes(e.name)) { rosNodes.push(e.name); newNode = true; }
+  }
+  if (!fresh.length) return;
+  rosLog = rosLog.concat(fresh).slice(-ROSLOG_MAX);
+  if (newNode) renderNodeFilter();
+  appendRows(fresh);
+}
+
+$('rl-level').onchange = renderRosLog;
+$('rl-node').onchange = renderRosLog;
+$('rl-clear').onclick = () => clearRosLog();
+$('rl-pause').onclick = () => {
+  rlPaused = !rlPaused;
+  $('rl-pause').textContent = rlPaused ? 'Resume scroll' : 'Pause scroll';
+  $('rl-pause').classList.toggle('primary', rlPaused);
+  if (!rlPaused) $('roslog').scrollTop = $('roslog').scrollHeight;
+};
+
+/* ---- console ------------------------------------------------------------
+   A dropdown of allowlisted operations, not a terminal. The server owns the
+   list; the page only renders it, fills in the arguments and shows the exact
+   argv before running it. A free-text box would invite `rm -rf` and then
+   refuse it, which is a worse experience than a menu of what works - and it
+   would make the preview a guess instead of the truth.                     */
+let consoleOps = [];
+
+async function loadConsoleOps() {
+  try {
+    const r = await fetch('/api/console_ops');
+    if (!r.ok) throw new Error('console_ops ' + r.status);
+    consoleOps = (await r.json()).ops || [];
+    const sel = $('con-op');
+    sel.innerHTML = '';
+    for (const o of consoleOps) {
+      const opt = document.createElement('option');
+      opt.value = o.op; opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    renderConsoleForm();
+  } catch (e) {
+    $('con-help').textContent = 'could not load the command list — ' + e.message;
+  }
+}
+
+function currentOp() {
+  return consoleOps.find(o => o.op === $('con-op').value) || null;
+}
+
+function renderConsoleForm() {
+  const o = currentOp();
+  for (let i = 0; i < 2; i++) {
+    const el = $('con-a' + i);
+    const name = o && o.args[i];
+    el.hidden = !name;
+    el.placeholder = name || '';
+    if (!name) el.value = '';
+  }
+  $('con-help').textContent = o
+    ? o.help + ' · stopped after ' + o.timeout + ' s'
+    : '';
+  renderConsolePreview();
+}
+
+function renderConsolePreview() {
+  const o = currentOp();
+  if (!o) { $('con-preview').textContent = '–'; return; }
+  const vals = [$('con-a0').value.trim(), $('con-a1').value.trim()];
+  const parts = o.preview.map(p => {
+    const m = /^\{(\d)\}$/.exec(p);
+    if (!m) return p;
+    return vals[+m[1]] || '<' + o.args[+m[1]] + '>';
+  });
+  $('con-preview').textContent = '$ ' + parts.join(' ');
+}
+
+$('con-op').onchange = renderConsoleForm;
+for (const id of ['con-a0', 'con-a1']) $(id).oninput = renderConsolePreview;
+
+$('con-run').onclick = () => {
+  const o = currentOp();
+  if (!o) return;
+  const args = o.args.map((_, i) => $('con-a' + i).value.trim());
+  if (args.some(a => !a)) {
+    $('con-out').textContent = 'fill in: ' + o.args.join(', ');
+    return;
+  }
+  $('con-run').disabled = true;
+  $('con-out').textContent = 'running… (up to ' + o.timeout + ' s)';
+  log('console: ' + o.label);
+  send({cmd: 'console', op: o.op, args});
+};
+
+function showConsoleResult(m) {
+  $('con-run').disabled = false;
+  const head = ['$ ' + (m.cmd ? m.cmd.join(' ') : m.op)];
+  if (m.timed_out) head.push('[stopped at the timeout after ' + m.seconds + ' s]');
+  else if (m.seconds !== undefined) head.push('[' + m.seconds + ' s]');
+  if (m.exit_code) head.push('[exit ' + m.exit_code + ']');
+  if (m.truncated) head.push('[output truncated]');
+  const body = m.error ? m.error : (m.output || '(no output)');
+  $('con-out').textContent = head.join('  ') + '\n\n' + body;
+  if (m.error) log('console: ' + m.error, 'err');
+}
+
+// Remember the tab, but only after everything above is defined - showTab
+// touches the map and the log.
+let startTab = 'control';
+try { startTab = localStorage.getItem('nexva.tab') || 'control'; }
+catch (e) { /* privacy mode: the default is fine */ }
+showTab(startTab);
+loadConsoleOps();
+renderQueueInfo();
+paintImu();
+
 connect();
+refreshMapSource();   // PNG until a state says a mission is running
 </script>
 </body>
 </html>

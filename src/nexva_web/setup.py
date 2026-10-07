@@ -28,6 +28,9 @@ setup(
         'console_scripts': [
             'waypoint_cli = nexva_web.cli:main',
             'web_bridge = nexva_web.web_bridge:main',
+            # Standalone, for when the page is the thing that is broken:
+            #   ros2 run nexva_web pi_health
+            'pi_health = nexva_web.pi_health:main',
         ],
     },
 )

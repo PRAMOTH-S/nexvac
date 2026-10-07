@@ -1,0 +1,64 @@
+# Coverage tuning for Nexva. These drive HOW COMPLETE the clean is.
+#
+# The two that matter most for "every nook and corner":
+#   cleaning_radius - half your actual cleaning swath. MEASURE THIS. Set it too
+#                     large and the planner spaces rows wider than the brush
+#                     reaches, leaving uncleaned strips between passes.
+#   row_overlap     - fraction of the swath each row re-covers. Higher = slower
+#                     but no gaps from heading drift.
+coverage_planner:
+  ros__parameters:
+    # --- geometry ---
+    robot_radius: 0.22        # matches nav2_params.yaml; used for inflation
+    cleaning_radius: 0.13     # half the cleaning swath - MEASURE AND CORRECT
+    row_overlap: 0.20         # 20% overlap between adjacent rows
+
+    # --- completeness ---
+    coverage_target: 0.97     # keep going until 97% of free space is covered
+    stop_at_target: false     # false = finish all rows even past the target
+    min_segment_len: 0.15     # keep short segments (corners) instead of dropping
+    max_gapfill: 6            # revisit passes for cells missed the first time
+
+    # --- sweep pattern ---
+    sweep_axis: 'x'
+    long_axis_sweep: true     # sweep along the room's long axis: fewer turns
+    row_substep_m: 0.4        # waypoint spacing along a row
+
+    # --- frames (must match nav2_params.yaml) ---
+    global_frame: 'map'
+    robot_base_frame: 'base_footprint'
+
+    # --- execution: hand each waypoint to the existing Nav2 stack ---
+    executor: 'nav2'
+    goal_timeout_sec: 30.0
+    no_progress_sec: 6.0
+    max_retries: 3
+
+    # --- speed: stay under Nav2 vx_max 0.28 and firmware MAX_LINEAR_SPEED 0.30 ---
+    v_cruise: 0.20
+    rotate_speed: 1.0
+    align_tol: 0.35
+    reach_tol: 0.12
+
+    # --- escape: no bumpers on Nexva, so lean on Nav2 recovery ---
+    contact_aware_escape: false
+    escape_after_skips: 2
+    escape_sec: 2.5
+    escape_speed: -0.12
+    escape_turn: 0.6
+    max_escapes: 25
+    wedge_avoid_radius: 0.45
+
+# The estimator that makes coverage_target and gap-fill actually work.
+# cleaning_radius and robot_radius MUST match the planner's above, or the two
+# nodes disagree about what has been cleaned and what can be reached.
+coverage_estimator:
+  ros__parameters:
+    cleaning_radius: 0.13     # keep identical to coverage_planner
+    robot_radius: 0.22        # keep identical to coverage_planner
+    global_frame: 'map'
+    robot_base_frame: 'base_footprint'
+    stamp_hz: 10.0            # how often the cleaned disk is stamped
+    publish_hz: 2.0           # covered_grid + coverage_ratio rate
+    only_when_active: false   # true = only accumulate while the planner cleans
+    max_jump_m: 1.0           # ignore AMCL relocalisation jumps this large

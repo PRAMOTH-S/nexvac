@@ -1,0 +1,38 @@
+# frontier_explorer, CLEAN mode, on the real robot.
+#
+# Loaded by clean.launch.py. Identical to explore.yaml except start_mode: the
+# map already exists (Nav2/AMCL is serving it), so the node skips straight to
+# the coverage sweep. Keep the two files in step when tuning.
+/**:
+  ros__parameters:
+    use_sim_time: false
+    start_mode: clean
+
+    map_frame: map
+    base_frame: base_footprint
+
+    footprint_length: 0.30
+    footprint_width: 0.30
+    safety_margin: 0.04
+    wall_clearance: 0.07
+    stop_distance: 0.18
+    slow_distance: 0.45
+
+    linear_speed: 0.15
+    angular_speed: 0.5
+
+    # Gyro-backed stall test on: the BNO055 is started by bringup now.
+    # frontier_explorer.py's own default is still False; this is what
+    # enables it.
+    use_imu_stall: false
+    protect_map_on_crash: false
+
+    row_spacing: 0.22
+    block_size: 0.5
+    clean_mode: sweep
+    block_stall_timeout: 8.0
+    block_timeout: 40.0
+    clean_threshold: 0.75
+    sweep_start: top
+    sweep_axis: auto
+    corner_turn_weight: 0.25

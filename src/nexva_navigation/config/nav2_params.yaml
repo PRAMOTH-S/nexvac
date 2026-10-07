@@ -210,8 +210,12 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
-      publish_frequency: 2.0
+      # 10 Hz = the RPLIDAR C1's rate, so a scan is in the costmap without
+      # waiting up to 200 ms for the next update. publish_frequency only
+      # feeds RViz/the behaviour server (MPPI reads the costmap directly);
+      # at 2 Hz RViz looked laggier than the robot really was.
+      update_frequency: 10.0
+      publish_frequency: 5.0
 
       global_frame: odom
       robot_base_frame: base_footprint
@@ -227,10 +231,18 @@ local_costmap:
       plugins:
         ["voxel_layer", "inflation_layer"]
 
+      # EARLY OBSTACLE REACTION. MPPI's CostCritic can only steer away from
+      # an obstacle it gets a cost GRADIENT from. At 0.25 m with
+      # robot_radius 0.22 there was a single 5 cm ring of cost and nothing
+      # beyond it: a trajectory either collided or cost nothing, so the
+      # robot kept driving at obstacles until ~3 cm from contact, then
+      # hesitated or fell into recoveries. 0.55 / 4.0 gives a smooth slope:
+      # cost ~183 at 0.30 m, ~123 at 0.40 m, ~67 at 0.55 m from the obstacle.
+      # Only the 0.22 m core blocks travel, so no doorway gets narrower.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.55
 
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
@@ -305,10 +317,13 @@ global_costmap:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
 
+      # Same slope as the local costmap. A global path planned 0.22-0.30 m
+      # from walls made PathAlignCritic (weight 14) pull the robot back
+      # toward the obstacle the CostCritic was trying to avoid.
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.55
 
       always_send_full_costmap: False
 

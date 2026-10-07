@@ -1,6 +1,8 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -58,13 +60,37 @@ def generate_launch_description():
         )
     )
 
+    # BNO055 + stall_guard. Safe to include unconditionally: if the board is
+    # not wired, or the adafruit libraries are not installed, the driver logs
+    # exactly what is missing and keeps running without publishing, and the
+    # guard reports "NO IMU - guard inactive" and never fires. Nothing here
+    # can fail bringup. `imu:=false` skips both nodes entirely.
+    imu_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('nexva_sensor'),
+                'launch',
+                'imu.launch.py'
+            )
+        ),
+        condition=IfCondition(LaunchConfiguration('imu')),
+    )
+
 
     return LaunchDescription([
+
+        DeclareLaunchArgument(
+            'imu', default_value='true',
+            description='Start the BNO055 driver and the stall guard. An '
+                        'absent board is logged and ignored, so this only '
+                        'needs turning off to silence the warnings'),
 
         robot_state_publisher,
 
         firmware_launch,
 
         lidar_launch,
+
+        imu_launch,
 
     ])

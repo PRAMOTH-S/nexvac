@@ -1,0 +1,42 @@
+# Zone coverage tuning.
+#
+# The two numbers that decide clean quality:
+#   swath   - the FULL width your brush/nozzle actually cleans. MEASURE IT.
+#   overlap - fraction of the swath each row re-covers, to absorb heading drift.
+# Row spacing = swath * (1 - overlap). At 0.26 / 0.15 that is 0.221 m.
+zone_coverage:
+  ros__parameters:
+    robot_radius: 0.22        # physical half-width; clearance needed to drive
+    swath: 0.30               # no brush fitted yet: the robot is 30 x 30 cm, so
+                              # "covered" means floor the body passed over. When
+                              # a brush is fitted, set this to ITS width.
+    overlap: 0.15
+    edge_pass: true           # perimeter/corner pass before the rows
+    min_segment_len: 0.25     # drop infill runs shorter than this
+    min_region_area: 0.40     # m2; ignore unreachable slivers
+    waypoint_spacing: 0.50    # metres between Nav2 goals along a pass
+
+    global_frame: 'map'
+    robot_base_frame: 'base_footprint'
+
+    goal_timeout_sec: 45.0
+    drive_mode: 'through_poses'   # whole sweep row = ONE Nav2 goal, so the
+                              # robot drives the row without stopping. Set to
+                              # 'per_waypoint' only to debug a single point.
+    max_retries: 1            # then defer; one blocked spot must not eat the job
+    retry_deferred: true      # re-attempt deferred waypoints once, at the end
+    auto_start: ''            # zone name to clean as soon as the map arrives
+
+# The estimator paints where the robot has been, and the planner spaces rows.
+# They MUST agree on the cleaning width or the coverage percentage is fiction:
+# cleaning_radius is half of the planner's swath.
+coverage_estimator:
+  ros__parameters:
+    cleaning_radius: 0.15     # = swath 0.30 / 2
+    robot_radius: 0.22        # keep identical to zone_coverage
+    global_frame: 'map'
+    robot_base_frame: 'base_footprint'
+    stamp_hz: 10.0
+    publish_hz: 2.0
+    only_when_active: false
+    max_jump_m: 1.0

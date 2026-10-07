@@ -13,3 +13,11 @@ venv/
 .venv/
 
 .DS_Store
+
+# push.sh bookkeeping (per machine, never synced)
+.push_history
+.last_push
+.push_by
+
+# editor/IDE runtime pipes
+.lgd-nfy*

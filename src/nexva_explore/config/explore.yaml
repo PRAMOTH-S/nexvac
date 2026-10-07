@@ -1,0 +1,51 @@
+# frontier_explorer, EXPLORE mode, on the real robot.
+#
+# Loaded by explore.launch.py. The node is named frontier_explorer there; the
+# wildcard key means a renamed node still picks these up.
+#
+# The robot-specific figures are the first block. The block/sweep figures
+# below them are the sim's explore.launch.py defaults, carried over unchanged
+# so a run here behaves like the runs that were tuned in Gazebo.
+/**:
+  ros__parameters:
+    use_sim_time: false
+    start_mode: explore
+
+    map_frame: map
+    base_frame: base_footprint
+
+    # The real chassis, with margin: 300 x 300 mm rather than the sim's 270,
+    # and more room off the walls. The RPLIDAR C1 sits higher than the
+    # sim's lidar, so low furniture edges it cannot see are given clearance
+    # here instead.
+    footprint_length: 0.30
+    footprint_width: 0.30
+    safety_margin: 0.04
+    wall_clearance: 0.07
+    stop_distance: 0.18
+    slow_distance: 0.45
+
+    linear_speed: 0.15
+    angular_speed: 0.5
+
+    # The BNO055 is now started by bringup (nexva_sensor/imu.launch.py,
+    # enable defaults true), so the gyro-backed stall test can run and is
+    # turned on here. It sits alongside the odometry-vs-map test, not
+    # instead of it. NOTE: frontier_explorer.py's own declare_parameter
+    # default is still False, so this YAML is what enables it.
+    use_imu_stall: false
+
+    # slam_toolbox on this robot is not driven through map_freeze, so holding
+    # scans during a crash would do nothing but hide the recovery from SLAM.
+    protect_map_on_crash: false
+
+    # Coverage, after exploring finishes - the sim's tuned defaults.
+    row_spacing: 0.22
+    block_size: 0.5
+    clean_mode: sweep
+    block_stall_timeout: 8.0
+    block_timeout: 40.0
+    clean_threshold: 0.75
+    sweep_start: top
+    sweep_axis: auto
+    corner_turn_weight: 0.25

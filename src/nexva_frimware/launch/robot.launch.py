@@ -1,3 +1,5 @@
+import os
+import shutil
 from launch import LaunchDescription
 from launch.actions import LogInfo, ExecuteProcess, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
@@ -33,11 +35,32 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Pinned to one core, and it is the ONLY thing here that is pinned.
+    #
+    # The kernel already spreads the other nodes across the Pi 5's four cores
+    # and does it better than a fixed map would; pinning everything would just
+    # serialise work onto fewer cores and run slower. This process is the
+    # exception: it is a 460800-baud serial link with a 500 ms watchdog at the
+    # far end, so being preempted mid-transfer means the ESP32 stops hearing
+    # cmd_vel and the wheels stop. A core it does not have to contend for
+    # removes that failure mode.
+    #
+    # NEXVA_AGENT_CORE=none turns it off; taskset missing is not fatal.
+    # launch_ros wants prefix as a SHELL STRING, not a list. Passing a list
+    # makes the executor try to exec 'taskset' with the rest swallowed, and it
+    # dies with "exception occurred while executing process" before the agent
+    # ever opens the serial port - i.e. no /odom, and bringup never comes up.
+    agent_core = os.environ.get('NEXVA_AGENT_CORE', '3')
+    agent_prefix = ''
+    if agent_core != 'none' and shutil.which('taskset'):
+        agent_prefix = 'taskset -c %s' % agent_core
+
     micro_ros_agent = Node(
         package='micro_ros_agent',
         executable='micro_ros_agent',
         name='micro_ros_agent',
         output='screen',
+        prefix=agent_prefix,
         arguments=[
             'serial',
             '--dev', '/dev/esp',

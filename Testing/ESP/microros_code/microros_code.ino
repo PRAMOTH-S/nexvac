@@ -1,4 +1,22 @@
-
+// ============================================================
+// NEXVA ESP32 - micro-ROS differential drive base
+// ============================================================
+// Arduino sketch (.ino) for ESP32. Put this file in a folder with the same
+// name, i.e.  nexva_esp32/nexva_esp32.ino , or the Arduino IDE will not open
+// it.
+//
+// Task layout (FreeRTOS, both cores used on purpose):
+//
+//   core 0, prio 3 : rosTask      - micro-ROS session, executor, publishing
+//   core 1, prio 5 : controlTask  - wheel velocity PI loop, hard 50 Hz
+//   core 1, prio 1 : loop()       - Arduino's own task, parked and idle
+//
+// micro-ROS (rcl / rclc / the XRCE session) is NOT thread safe. Every rcl_*,
+// rclc_* and rmw_* call in this file happens on rosTask and nowhere else.
+// controlTask never touches ROS, and rosTask never touches a motor pin - it
+// only asks for a stop through requestStop(). That split is what keeps a
+// blocking session call from stalling the control loop, which is the whole
+// reason for using tasks here.
 
 #include <Arduino.h>
 #include <micro_ros_arduino.h>
@@ -16,6 +34,10 @@
 
 #include <rmw_microros/rmw_microros.h>
 #include <uxr/client/profile/transport/custom/custom_transport.h>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // ============================================================
 // MOTOR PINS
@@ -45,17 +67,41 @@
 
 #define PWM_FREQ       1000
 #define PWM_RESOLUTION 8
-// Full authority for the controller. The speed limit is NOT set here any more
-// - see MAX_LINEAR_SPEED. Capping PWM to limit speed is what made the robot
-// unusable on 28 Sep: PWM is a duty cycle, and how much speed a given duty
-// cycle buys depends on the battery.
-#define MAX_PWM 255
+
+// Usable PWM band. Any non-zero command is pushed into [min_pwm, max_pwm] in
+// the direction the target asks for, so the motor is never handed a duty cycle
+// too small to actually turn the wheel - which is what made it sit and whine.
+// Zero target still means a true 0 (both IN pins LOW, wheel coasts).
+//
+// These are the power-on DEFAULTS. The live values are the variables below and
+// are retunable from /pid_limits without a reflash - see limitsCallback().
+#define DEFAULT_MAX_PWM 255
+#define DEFAULT_MIN_PWM 150
 
 // The real speed limits, enforced on the velocity TARGET. Because the loop
 // below closes on measured wheel speed, these are honoured whatever the pack
 // voltage is doing.
-#define MAX_LINEAR_SPEED  0.30
+#define DEFAULT_MAX_LINEAR_SPEED  0.30
 #define MAX_ANGULAR_SPEED 2.0
+
+// Hard bounds on what /pid_limits is allowed to set. A UI slider, a typo or a
+// stale message must not be able to command a duty cycle the driver cannot do
+// or a speed this chassis cannot stop from. The floor of 40 on max_pwm is
+// simply "low enough to be useless, high enough not to be a divide-by-nothing".
+#define PWM_ABS_MAX            255
+#define PWM_ABS_MIN              0
+#define MAX_PWM_LOWER_BOUND     40
+#define SPEED_ABS_MAX          0.50
+
+// Live limits. int (not double) on purpose: a 32-bit aligned load is atomic on
+// the ESP32, so setLeftMotor/setRightMotor can read these straight from
+// controlTask without taking state_mux in the motor path.
+int motor_min_pwm = DEFAULT_MIN_PWM;
+int motor_max_pwm = DEFAULT_MAX_PWM;
+
+// Only ever touched on rosTask (cmdVelCallback reads it, limitsCallback writes
+// it), so unlike the PWM band it needs no cross-task guard.
+double max_linear_speed = DEFAULT_MAX_LINEAR_SPEED;
 
 // ---------- closed-loop wheel velocity control ----------
 //
@@ -66,16 +112,30 @@
 //
 // Feedforward gets the wheel moving immediately; the integrator absorbs
 // whatever the feedforward got wrong, including pack voltage drift.
-#define CONTROL_HZ        50.0
-#define FF_BREAKAWAY      86.0   // PWM at which the wheels start turning
+#define CONTROL_PERIOD_MS 20                          // 50 Hz
+#define CONTROL_HZ        (1000.0 / CONTROL_PERIOD_MS)
+
+// Matches the default MIN_PWM: the floor is the breakaway, so the feedforward
+// starts exactly where the wheel starts turning instead of below it. Raising
+// min_pwm at runtime does NOT move this by itself - set z on /pid_gains too,
+// or the feedforward starts below the new floor and the clamp does the work.
+#define FF_BREAKAWAY      ((double)DEFAULT_MIN_PWM)
 #define FF_SLOPE         0.0098  // m/s gained per PWM count above breakaway
 #define PID_I_MAX        110.0   // anti-windup clamp, in PWM counts
 #define VEL_DEADBAND      0.005  // below this target, hold the wheel stopped
 #define VEL_FILTER_ALPHA  0.35   // low-pass on measured wheel speed
 
+// Backstop for the case where MIN_PWM still is not enough to break static
+// friction (thick carpet, a low pack, a stiff gearbox). While a target is set
+// and the wheel is not turning, the output climbs at a fixed rate instead of
+// waiting on (small error x Ki), which took over a second on its own.
+#define STALL_SPEED       0.01   // m/s: measured speed below this = stalled
+#define STALL_RAMP_PWM    150.0  // PWM counts per second added while stalled
+
 // Starting gains, in PWM counts per (m/s) and per (m/s x s). Retunable at
 // runtime by publishing to /pid_gains (x=Kp, y=Ki, z=feedforward breakaway),
-// so tuning does not need a reflash.
+// so tuning does not need a reflash. Guarded by state_mux - rosTask writes
+// them, controlTask reads them.
 double pid_kp = 45.0;
 double pid_ki = 500.0;
 double ff_breakaway = FF_BREAKAWAY;
@@ -88,6 +148,35 @@ double ff_breakaway = FF_BREAKAWAY;
 #define WHEEL_RADIUS   (WHEEL_DIAMETER / 2.0)
 #define WHEEL_BASE 0.245
 #define ENCODER_CPR 662.0
+
+// ============================================================
+// TASK CONFIGURATION
+// ============================================================
+// micro-ROS needs a large stack - rcl plus the XRCE session plus the message
+// (de)serialisers all live on it. 16 KB is the smallest size that has proved
+// reliable; below about 12 KB it stack-overflows during session creation.
+#define ROS_TASK_STACK        16384
+#define ROS_TASK_PRIORITY     3
+#define ROS_TASK_CORE         0
+
+// The control loop is small (floats and two analogWrite calls) but must never
+// be late, so it gets the higher priority and its own core.
+#define CONTROL_TASK_STACK    4096
+#define CONTROL_TASK_PRIORITY 5
+#define CONTROL_TASK_CORE     1
+
+TaskHandle_t ros_task_handle = NULL;
+TaskHandle_t control_task_handle = NULL;
+
+// Two spinlocks rather than one mutex. Both critical sections are a handful of
+// assignments, so they finish in well under a microsecond and cannot cause the
+// priority inversion a mutex could between a prio-5 and a prio-3 task.
+//
+//   enc_mux   - encoder counts. Shared with the ISRs, so ISR context must use
+//               the portENTER_CRITICAL_ISR variant.
+//   state_mux - commands, gains and telemetry shared by the two tasks.
+portMUX_TYPE enc_mux   = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============================================================
 // TIMING
@@ -183,10 +272,12 @@ extern "C" size_t nexva_transport_read(struct uxrCustomTransport *t,
 // ============================================================
 // MICRO-ROS OBJECTS
 // ============================================================
+// Touched only by rosTask.
 
 rcl_node_t node;
 rcl_subscription_t cmd_vel_subscriber;
 rcl_subscription_t gains_subscriber;
+rcl_subscription_t limits_subscriber;
 rcl_publisher_t encoder_publisher;
 rcl_publisher_t pwm_publisher;
 rcl_publisher_t wheelvel_publisher;
@@ -199,6 +290,7 @@ rcl_allocator_t allocator;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 geometry_msgs__msg__Vector3 gains_msg;
+geometry_msgs__msg__Vector3 limits_msg;
 geometry_msgs__msg__Vector3 encoder_msg;
 geometry_msgs__msg__Vector3 pwm_msg;
 geometry_msgs__msg__Vector3 wheelvel_msg;
@@ -222,14 +314,14 @@ AgentState agent_state = WAITING_AGENT;
 AgentState previous_state = WAITING_AGENT;
 
 // ============================================================
-// ENCODERS
+// ENCODERS  (guarded by enc_mux)
 // ============================================================
 
 volatile long left_encoder_count = 0;
 volatile long right_encoder_count = 0;
 
 // ============================================================
-// ODOMETRY
+// ODOMETRY  (rosTask only)
 // ============================================================
 
 double x_position = 0.0;
@@ -242,7 +334,7 @@ long previous_right_count = 0;
 unsigned long last_odom_time = 0;
 
 // ============================================================
-// COMMAND
+// SHARED COMMAND / TELEMETRY  (guarded by state_mux)
 // ============================================================
 
 unsigned long last_cmd_time = 0;
@@ -253,14 +345,20 @@ float current_angular = 0.0;
 double target_left_velocity = 0.0;
 double target_right_velocity = 0.0;
 
-// Measured (filtered) wheel velocities and the loop's integral state.
+// Set false whenever the base must not drive: no agent, command timeout,
+// shutting down. controlTask is the only thing that writes the motor pins, so
+// this flag is how every other part of the firmware stops the robot.
+bool drive_enabled = false;
+
+// Filled in by controlTask, published by rosTask.
 double measured_left_velocity = 0.0;
 double measured_right_velocity = 0.0;
-double integral_left = 0.0;
-double integral_right = 0.0;
 int applied_left_pwm = 0;
 int applied_right_pwm = 0;
 
+// controlTask private state - no lock needed.
+double integral_left = 0.0;
+double integral_right = 0.0;
 long prev_control_left = 0;
 long prev_control_right = 0;
 unsigned long last_control_us = 0;
@@ -275,6 +373,31 @@ bool entities_created = false;
 
 int publish_failures = 0;
 
+// ============================================================
+// FORWARD DECLARATIONS
+// ============================================================
+// The .ino preprocessor usually generates these, but it gives up on files
+// that mix classes and macros. Declaring them by hand keeps the build honest.
+
+void setLeftMotor(int pwm);
+void setRightMotor(int pwm);
+void requestStop();
+void forceMotorsOff();
+void error_loop();
+void resetOdometry();
+bool createEntities();
+void destroyEntities();
+bool agentAvailable();
+void publishEncoders();
+void publishOdometry();
+void controlStep();
+void controlTask(void *arg);
+void rosTask(void *arg);
+
+// ============================================================
+// PUBLISH TRACKING
+// ============================================================
+
 void trackPublish(rcl_ret_t rc) {
   if (rc == RCL_RET_OK) {
     publish_failures = 0;
@@ -288,9 +411,15 @@ void trackPublish(rcl_ret_t rc) {
 // ============================================================
 
 void error_loop() {
-  stopMotors();
+  // Suspend the control task first so nothing fights us for the motor pins,
+  // then kill the outputs directly and stay dead.
+  if (control_task_handle != NULL) {
+    vTaskSuspend(control_task_handle);
+  }
+  forceMotorsOff();
+
   while (true) {
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -309,11 +438,13 @@ void error_loop() {
   }
 
 // ============================================================
-// MOTOR CONTROL
+// MOTOR OUTPUT
 // ============================================================
+// Called from controlTask only, except forceMotorsOff() on the shutdown and
+// error paths - and those suspend controlTask first.
 
 void setLeftMotor(int pwm) {
-  pwm = constrain(pwm, -MAX_PWM, MAX_PWM);
+  pwm = constrain(pwm, -motor_max_pwm, motor_max_pwm);
 
   if (pwm > 0) {
     digitalWrite(LEFT_IN1, HIGH);
@@ -331,7 +462,7 @@ void setLeftMotor(int pwm) {
 }
 
 void setRightMotor(int pwm) {
-  pwm = constrain(pwm, -MAX_PWM, MAX_PWM);
+  pwm = constrain(pwm, -motor_max_pwm, motor_max_pwm);
 
   if (pwm > 0) {
     digitalWrite(RIGHT_IN1, HIGH);
@@ -348,168 +479,363 @@ void setRightMotor(int pwm) {
   }
 }
 
-void stopMotors() {
+void forceMotorsOff() {
   setLeftMotor(0);
   setRightMotor(0);
-  current_linear = 0.0;
-  current_angular = 0.0;
-  // Clear the loop too. Leaving the targets or the integral set would have the
-  // controller fight the stop and lurch the moment it is allowed to run again.
+}
+
+// Ask for a stop from any task. This does NOT write the motor pins: it clears
+// the targets and drops drive_enabled, and controlTask zeroes the outputs on
+// its next tick (within CONTROL_PERIOD_MS). Keeping all pin writes on one task
+// is what makes the two-task design safe.
+void requestStop() {
+  portENTER_CRITICAL(&state_mux);
+  drive_enabled = false;
   target_left_velocity = 0.0;
   target_right_velocity = 0.0;
-  integral_left = 0.0;
-  integral_right = 0.0;
-  applied_left_pwm = 0;
-  applied_right_pwm = 0;
-  last_control_us = 0;   // re-seed dt rather than carry the idle gap forward
+  current_linear = 0.0;
+  current_angular = 0.0;
+  portEXIT_CRITICAL(&state_mux);
 }
 
 // ============================================================
 // ENCODER INTERRUPTS
 // ============================================================
+// Single-edge, single-channel: A rising or falling, direction from B. Uses the
+// _ISR spinlock variant, which is mandatory in interrupt context.
 
 void IRAM_ATTR leftEncoderISR() {
   int a = digitalRead(LEFT_ENCODER_A);
   int b = digitalRead(LEFT_ENCODER_B);
+
+  portENTER_CRITICAL_ISR(&enc_mux);
   if (a == b)
     left_encoder_count++;
   else
     left_encoder_count--;
+  portEXIT_CRITICAL_ISR(&enc_mux);
 }
 
 void IRAM_ATTR rightEncoderISR() {
   int a = digitalRead(RIGHT_ENCODER_A);
   int b = digitalRead(RIGHT_ENCODER_B);
+
+  portENTER_CRITICAL_ISR(&enc_mux);
   if (a == b)
     right_encoder_count++;
   else
     right_encoder_count--;
+  portEXIT_CRITICAL_ISR(&enc_mux);
+}
+
+// Read both counts as one consistent pair. Taken separately, a fresh left
+// against a stale right integrates as a rotation that never happened.
+static inline void readEncoders(long *l, long *r) {
+  portENTER_CRITICAL(&enc_mux);
+  *l = left_encoder_count;
+  *r = right_encoder_count;
+  portEXIT_CRITICAL(&enc_mux);
 }
 
 // ============================================================
-// CMD_VEL CALLBACK
+// CMD_VEL CALLBACK   (rosTask)
 // ============================================================
 
-// cmd_vel now only sets velocity TARGETS. Nothing here touches PWM - that is
-// the control loop's job, once it can compare the target against what the
-// wheels are actually doing.
+// cmd_vel only sets velocity TARGETS. Nothing here touches PWM - that is
+// controlTask's job, once it can compare the target against what the wheels
+// are actually doing.
 void cmdVelCallback(const void *msgin) {
   const geometry_msgs__msg__Twist *msg =
       (const geometry_msgs__msg__Twist *)msgin;
 
-  current_linear = constrain(msg->linear.x, -MAX_LINEAR_SPEED, MAX_LINEAR_SPEED);
-  current_angular = constrain(msg->angular.z, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED);
+  double linear  = constrain(msg->linear.x, -max_linear_speed, max_linear_speed);
+  double angular = constrain(msg->angular.z, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED);
 
-  double left_velocity = current_linear - (current_angular * WHEEL_BASE / 2.0);
-  double right_velocity = current_linear + (current_angular * WHEEL_BASE / 2.0);
+  double left_velocity  = linear - (angular * WHEEL_BASE / 2.0);
+  double right_velocity = linear + (angular * WHEEL_BASE / 2.0);
 
   // A turn can push one wheel past the limit. Scale both together so the
   // commanded turning ratio survives, instead of clipping one wheel and
   // silently straightening the curve.
-  double peak = max(fabs(left_velocity), fabs(right_velocity));
-  if (peak > MAX_LINEAR_SPEED) {
-    double scale = MAX_LINEAR_SPEED / peak;
-    left_velocity *= scale;
+  double peak = fmax(fabs(left_velocity), fabs(right_velocity));
+  if (peak > max_linear_speed) {
+    double scale = max_linear_speed / peak;
+    left_velocity  *= scale;
     right_velocity *= scale;
   }
 
-  target_left_velocity = left_velocity;
+  portENTER_CRITICAL(&state_mux);
+  current_linear  = (float)linear;
+  current_angular = (float)angular;
+  target_left_velocity  = left_velocity;
   target_right_velocity = right_velocity;
-
+  drive_enabled = true;
   last_cmd_time = millis();
+  portEXIT_CRITICAL(&state_mux);
 }
 
 // Live gain tuning: publish geometry_msgs/Vector3 to /pid_gains with
 // x = Kp, y = Ki, z = feedforward breakaway PWM. Zero or negative leaves that
-// term alone, so any one of the three can be adjusted on its own.
+// term alone (except Ki, where 0 is accepted and only negative is ignored),
+// so any one of the three can be adjusted on its own:
+//
+//   ros2 topic pub --once /pid_gains geometry_msgs/msg/Vector3 \
+//        "{x: -1.0, y: -1.0, z: 160.0}"
 void gainsCallback(const void *msgin) {
   const geometry_msgs__msg__Vector3 *msg =
       (const geometry_msgs__msg__Vector3 *)msgin;
-  if (msg->x > 0.0) pid_kp = msg->x;
+
+  portENTER_CRITICAL(&state_mux);
+  if (msg->x > 0.0)  pid_kp = msg->x;
   if (msg->y >= 0.0) pid_ki = msg->y;
-  if (msg->z > 0.0) ff_breakaway = msg->z;
+  if (msg->z > 0.0)  ff_breakaway = msg->z;
+  portEXIT_CRITICAL(&state_mux);
+
+  // Private to controlTask, and a stale integral against new gains is worse
+  // than a zero one.
   integral_left = 0.0;
   integral_right = 0.0;
 }
 
+// Live speed/PWM limits: publish geometry_msgs/Vector3 to /pid_limits with
+// x = min PWM, y = max PWM, z = max linear speed (m/s). A value <= 0 leaves
+// that field alone, so any one of the three can be changed on its own:
+//
+//   ros2 topic pub --once /pid_limits geometry_msgs/msg/Vector3 \
+//        "{x: 120.0, y: 200.0, z: 0.22}"      all three
+//   ros2 topic pub --once /pid_limits geometry_msgs/msg/Vector3 \
+//        "{x: -1.0, y: -1.0, z: 0.15}"        just the speed cap
+//
+// min is the duty cycle at which the wheels actually break away; below it the
+// motors buzz and do not turn. max caps the top duty cycle. The PI loop is
+// then only ever allowed to ask for something inside that band.
+//
+// Everything is bounded and the pair is kept ordered, because these numbers
+// arrive from a web page. An inverted band (min > max) would make wheelControl
+// clamp to the floor and then to the ceiling, pinning both wheels at max - a
+// robot that goes to full speed the moment a slider is dragged the wrong way.
+void limitsCallback(const void *msgin) {
+  const geometry_msgs__msg__Vector3 *msg =
+      (const geometry_msgs__msg__Vector3 *)msgin;
+
+  int    new_min   = motor_min_pwm;
+  int    new_max   = motor_max_pwm;
+  double new_speed = max_linear_speed;
+
+  if (msg->x > 0.0) new_min = (int)constrain(msg->x, PWM_ABS_MIN, PWM_ABS_MAX);
+  if (msg->y > 0.0) new_max = (int)constrain(msg->y, MAX_PWM_LOWER_BOUND,
+                                             PWM_ABS_MAX);
+  if (msg->z > 0.0) new_speed = constrain(msg->z, 0.01, SPEED_ABS_MAX);
+
+  // Ordering is enforced after clamping, not before: clamping can itself
+  // invert the pair (min 250 against a max clamped to 200).
+  if (new_min >= new_max) new_min = new_max - 1;
+  if (new_min < PWM_ABS_MIN) new_min = PWM_ABS_MIN;
+
+  portENTER_CRITICAL(&state_mux);
+  motor_min_pwm = new_min;
+  motor_max_pwm = new_max;
+  portEXIT_CRITICAL(&state_mux);
+
+  // rosTask-only, so it sits outside the critical section.
+  max_linear_speed = new_speed;
+
+  // The band moved under the integrator, so whatever it had wound up to was
+  // accumulated against a different clamp. Same reasoning as gainsCallback.
+  integral_left = 0.0;
+  integral_right = 0.0;
+
+  DBG("limits: pwm ");
+  DBG(new_min);
+  DBG("..");
+  DBG(new_max);
+  DBG("  speed ");
+  DBG(new_speed);
+  DBGLN(" m/s");
+}
+
 // ============================================================
-// WHEEL VELOCITY CONTROL LOOP
+// WHEEL VELOCITY CONTROL   (controlTask)
 // ============================================================
 
 static inline double countsToMetres(long counts) {
   return ((double)counts / ENCODER_CPR) * (2.0 * PI * WHEEL_RADIUS);
 }
 
-// One wheel's PI + feedforward step. Returns the PWM to apply.
+// One wheel's feedforward + PI step. Returns the PWM to apply, already forced
+// into the [min_pwm, max_pwm] band in the direction the target asks for. The
+// band is passed in rather than read from the globals: controlStep snapshots
+// it under state_mux once, so both wheels are controlled against the same
+// limits even if /pid_limits lands mid-step.
 static int wheelControl(double target, double measured, double *integral,
-                        double dt) {
+                        double dt, double kp, double ki, double ff_break,
+                        int min_pwm, int max_pwm) {
   if (fabs(target) < VEL_DEADBAND) {
     *integral = 0.0;
     return 0;
   }
 
-  double error = target - measured;
-  double sign = (target > 0.0) ? 1.0 : -1.0;
+  double error   = target - measured;
+  double sign    = (target > 0.0) ? 1.0 : -1.0;
+  double ki_safe = (ki > 1.0) ? ki : 1.0;
 
   // Feedforward: the duty cycle this speed needed last time we measured the
   // motors. Only ever an estimate - the integrator carries the rest.
-  double ff = sign * (ff_breakaway + fabs(target) / FF_SLOPE);
+  double ff = sign * (ff_break + fabs(target) / FF_SLOPE);
 
-  double candidate = ff + pid_kp * error + pid_ki * (*integral);
+  double candidate = ff + kp * error + ki * (*integral);
 
-  // Integrate only while we have authority left, so a saturated output does
-  // not keep winding the integral up and overshoot on the way back down.
-  if (candidate > -MAX_PWM && candidate < MAX_PWM) {
-    *integral += error * dt;
-    *integral = constrain(*integral, -PID_I_MAX / max(pid_ki, 1.0),
-                                      PID_I_MAX / max(pid_ki, 1.0));
-    candidate = ff + pid_kp * error + pid_ki * (*integral);
+  // Everything below reasons in the driving direction, so positive always
+  // means "more output", whichever way the wheel is turning.
+  double out = candidate * sign;
+  double signed_error = error * sign;
+
+  bool at_ceiling = (out >= (double)max_pwm);
+  bool at_floor   = (out <= (double)min_pwm);
+
+  // Conditional integration. The band is hard at both ends now, so winding
+  // past either only builds a term that has to unwind again later. The floor
+  // matters as much as the ceiling: at a low target the wheel overruns what
+  // was asked, the error goes negative, and without this guard the integral
+  // would drive itself to its clamp for nothing.
+  bool block_up   = at_ceiling && signed_error > 0.0;
+  bool block_down = at_floor   && signed_error < 0.0;
+
+  if (!block_up && !block_down) {
+    // Wheel not turning although a target is set: static friction MIN_PWM did
+    // not break. A small error x Ki integrates far too slowly to help, so ramp
+    // at a fixed rate instead. Once the wheel moves, normal PI takes over.
+    if (fabs(measured) < STALL_SPEED) {
+      *integral += sign * (STALL_RAMP_PWM / ki_safe) * dt;
+    } else {
+      *integral += error * dt;
+    }
+
+    *integral = constrain(*integral, -PID_I_MAX / ki_safe, PID_I_MAX / ki_safe);
+
+    candidate = ff + kp * error + ki * (*integral);
+    out = candidate * sign;
   }
 
-  return (int)constrain(candidate, -(double)MAX_PWM, (double)MAX_PWM);
+  // Force into the usable band. Clamping `out` rather than |candidate| keeps
+  // the direction tied to the target: if the PI term ever asks for reverse to
+  // shed an overshoot, the wheel coasts down at MIN_PWM instead of being
+  // actively driven backwards, which would be a hard plug-brake.
+  if (out < (double)min_pwm) out = (double)min_pwm;
+  if (out > (double)max_pwm) out = (double)max_pwm;
+
+  return (int)(sign * out);
 }
 
-void controlLoop() {
-  unsigned long now = micros();
-  if (last_control_us == 0) {
-    last_control_us = now;
-    return;
+void controlStep() {
+  // ---- snapshot the shared command state ----
+  bool   enabled;
+  double target_l, target_r;
+  double kp, ki, ff_break;
+  int    min_pwm, max_pwm;
+  unsigned long cmd_time;
+
+  portENTER_CRITICAL(&state_mux);
+  enabled  = drive_enabled;
+  target_l = target_left_velocity;
+  target_r = target_right_velocity;
+  kp       = pid_kp;
+  ki       = pid_ki;
+  ff_break = ff_breakaway;
+  min_pwm  = motor_min_pwm;
+  max_pwm  = motor_max_pwm;
+  cmd_time = last_cmd_time;
+  portEXIT_CRITICAL(&state_mux);
+
+  // Command watchdog lives here, not on rosTask. If the ROS side is blocked in
+  // a session call the base must still notice that commands stopped arriving.
+  if (enabled && (millis() - cmd_time > CMD_TIMEOUT_MS)) {
+    enabled = false;
+    portENTER_CRITICAL(&state_mux);
+    drive_enabled = false;
+    target_left_velocity = 0.0;
+    target_right_velocity = 0.0;
+    portEXIT_CRITICAL(&state_mux);
+    target_l = 0.0;
+    target_r = 0.0;
   }
-  double dt = (now - last_control_us) / 1000000.0;
-  if (dt < 1.0 / CONTROL_HZ) {
-    return;
+
+  unsigned long now = micros();
+  double dt;
+
+  if (last_control_us == 0) {
+    dt = 1.0 / CONTROL_HZ;
+  } else {
+    dt = (now - last_control_us) / 1000000.0;
   }
   last_control_us = now;
 
-  // The loop does not run while the base is stopped, so the first tick after
-  // driving resumes sees dt equal to the whole idle period. Integrating that
-  // in one step drove the integral straight to its clamp and produced a
-  // full-power kick - measured at PWM 246 for a 0.15 m/s request. Cap dt so a
-  // gap can only ever contribute one normal step.
-  if (dt > 2.0 / CONTROL_HZ) {
-    dt = 2.0 / CONTROL_HZ;
-  }
+  // vTaskDelayUntil makes dt very close to CONTROL_PERIOD_MS, but a missed
+  // tick or a resume after a stop must not integrate a whole gap in one step.
+  // That is what produced the old full-power kick (PWM 246 for a 0.15 m/s
+  // request), so cap it at two nominal periods.
+  if (dt > 2.0 / CONTROL_HZ) dt = 2.0 / CONTROL_HZ;
+  if (dt <= 0.0)             dt = 1.0 / CONTROL_HZ;
 
-  noInterrupts();
-  long l = left_encoder_count;
-  long r = right_encoder_count;
-  interrupts();
+  // ---- measure ----
+  long l, r;
+  readEncoders(&l, &r);
 
-  double raw_left = countsToMetres(l - prev_control_left) / dt;
+  double raw_left  = countsToMetres(l - prev_control_left) / dt;
   double raw_right = countsToMetres(r - prev_control_right) / dt;
-  prev_control_left = l;
+  prev_control_left  = l;
   prev_control_right = r;
 
-  measured_left_velocity += VEL_FILTER_ALPHA * (raw_left - measured_left_velocity);
-  measured_right_velocity += VEL_FILTER_ALPHA * (raw_right - measured_right_velocity);
+  double meas_l = measured_left_velocity
+                + VEL_FILTER_ALPHA * (raw_left - measured_left_velocity);
+  double meas_r = measured_right_velocity
+                + VEL_FILTER_ALPHA * (raw_right - measured_right_velocity);
 
-  applied_left_pwm = wheelControl(target_left_velocity, measured_left_velocity,
-                                  &integral_left, dt);
-  applied_right_pwm = wheelControl(target_right_velocity, measured_right_velocity,
-                                   &integral_right, dt);
+  // ---- act ----
+  int pwm_l = 0;
+  int pwm_r = 0;
 
-  setLeftMotor(applied_left_pwm);
-  setRightMotor(applied_right_pwm);
+  if (enabled) {
+    pwm_l = wheelControl(target_l, meas_l, &integral_left,  dt, kp, ki, ff_break,
+                         min_pwm, max_pwm);
+    pwm_r = wheelControl(target_r, meas_r, &integral_right, dt, kp, ki, ff_break,
+                         min_pwm, max_pwm);
+  } else {
+    // Clear the loop as well. A live integral would have the controller fight
+    // the stop and lurch the moment it is allowed to run again.
+    integral_left = 0.0;
+    integral_right = 0.0;
+  }
+
+  setLeftMotor(pwm_l);
+  setRightMotor(pwm_r);
+
+  // ---- publish state for rosTask ----
+  portENTER_CRITICAL(&state_mux);
+  measured_left_velocity  = meas_l;
+  measured_right_velocity = meas_r;
+  applied_left_pwm  = pwm_l;
+  applied_right_pwm = pwm_r;
+  portEXIT_CRITICAL(&state_mux);
+}
+
+// Hard 50 Hz. vTaskDelayUntil paces against an absolute wake time, so the
+// period does not drift with however long controlStep() took - unlike a
+// delay() at the bottom of a loop, which adds its own runtime every cycle.
+void controlTask(void *arg) {
+  (void)arg;
+
+  const TickType_t period = pdMS_TO_TICKS(CONTROL_PERIOD_MS);
+  TickType_t last_wake = xTaskGetTickCount();
+
+  // Seed the encoder deltas so the first tick does not see a huge jump.
+  readEncoders(&prev_control_left, &prev_control_right);
+  last_control_us = micros();
+
+  for (;;) {
+    vTaskDelayUntil(&last_wake, period);
+    controlStep();
+  }
 }
 
 // ============================================================
@@ -521,10 +847,7 @@ void resetOdometry() {
   y_position = 0.0;
   theta_position = 0.0;
 
-  noInterrupts();
-  previous_left_count = left_encoder_count;
-  previous_right_count = right_encoder_count;
-  interrupts();
+  readEncoders(&previous_left_count, &previous_right_count);
 
   last_odom_time = millis();
 }
@@ -580,13 +903,12 @@ bool initializeTFMessage() {
 }
 
 // ============================================================
-// CREATE MICRO-ROS ENTITIES
+// CREATE MICRO-ROS ENTITIES   (rosTask)
 // ============================================================
-// Publishers stay RELIABLE on purpose. tf2_ros::TransformListener subscribes
-// to /tf as RELIABLE and offers no way to change that, and RViz/ros2 topic
-// default to RELIABLE too - a BEST_EFFORT publisher simply never matches them.
-// The 1 Hz stall this used to cause was a bandwidth problem, not a QoS one,
-// and is fixed by MICROROS_BAUD above.
+// /odom and /tf stay RELIABLE on purpose. tf2_ros::TransformListener
+// subscribes to /tf as RELIABLE and offers no way to change that, and
+// RViz/ros2 topic default to RELIABLE too - a BEST_EFFORT publisher simply
+// never matches them.
 
 bool createEntities() {
   allocator = rcl_get_default_allocator();
@@ -621,10 +943,10 @@ bool createEntities() {
   // BEST_EFFORT is essential here, not an optimisation. A reliable publish
   // calls uxr_run_session_until_confirm_delivery() and blocks until the agent
   // acknowledges, which times out at RMW_UXRCE_PUBLISH_RELIABLE_TIMEOUT
-  // (1000 ms) and pins the whole control loop to 1 Hz - at any baud rate and
-  // any message size. Nothing but nexva_frimware's own nodes read this topic,
-  // and they subscribe BEST_EFFORT to match; /odom and /tf are re-published
-  // from the Pi as RELIABLE for tf2 and RViz.
+  // (1000 ms) and pins rosTask to 1 Hz - at any baud rate and any message
+  // size. Nothing but nexva_frimware's own nodes read this topic, and they
+  // subscribe BEST_EFFORT to match; /odom and /tf are re-published from the Pi
+  // as RELIABLE for tf2 and RViz.
   if (rclc_publisher_init_best_effort(&encoder_publisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
           "/enco/counts") != RCL_RET_OK) {
@@ -633,7 +955,7 @@ bool createEntities() {
   }
 
   // Observability for the control loop. BEST_EFFORT: these are debug streams,
-  // a dropped sample is fine and must never block the reliable odom stream.
+  // a dropped sample is fine and must never block anything else.
   // /motor_pwm  x = left PWM,            y = right PWM
   // /wheel_vel  x = left measured m/s,   y = right measured m/s
   if (rclc_publisher_init_best_effort(&pwm_publisher, &node,
@@ -654,6 +976,14 @@ bool createEntities() {
           ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
           "/pid_gains") != RCL_RET_OK) {
     DBGLN("Failed to create gains subscriber");
+    return false;
+  }
+
+  // x = min PWM, y = max PWM, z = max linear speed. See limitsCallback.
+  if (rclc_subscription_init_default(&limits_subscriber, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3),
+          "/pid_limits") != RCL_RET_OK) {
+    DBGLN("Failed to create limits subscriber");
     return false;
   }
 
@@ -678,13 +1008,17 @@ bool createEntities() {
   geometry_msgs__msg__Vector3__init(&pwm_msg);
   geometry_msgs__msg__Vector3__init(&wheelvel_msg);
   geometry_msgs__msg__Vector3__init(&gains_msg);
+  geometry_msgs__msg__Vector3__init(&limits_msg);
 
   if (!initializeOdomMessage() || !initializeTFMessage()) {
     DBGLN("Failed to initialize messages");
     return false;
   }
 
-  if (rclc_executor_init(&executor, &support.context, 2, &allocator) != RCL_RET_OK) {
+  // Handle count must equal the number of subscriptions added below:
+  // cmd_vel, pid_gains, pid_limits. Adding a subscription without raising this
+  // makes rclc_executor_add_subscription fail and entity creation abort.
+  if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK) {
     DBGLN("Failed to init executor");
     return false;
   }
@@ -701,12 +1035,22 @@ bool createEntities() {
     return false;
   }
 
+  if (rclc_executor_add_subscription(&executor, &limits_subscriber,
+          &limits_msg, &limitsCallback, ON_NEW_DATA) != RCL_RET_OK) {
+    DBGLN("Failed to add limits subscription to executor");
+    return false;
+  }
+
   // Must happen before the first publishOdometry(), or /tf and /odom go out
   // stamped with ESP32 uptime instead of ROS time.
   rmw_uros_sync_session(1000);
 
   resetOdometry();
+
+  portENTER_CRITICAL(&state_mux);
   last_cmd_time = millis();
+  portEXIT_CRITICAL(&state_mux);
+
   publish_failures = 0;
 
   DBGNL();
@@ -722,7 +1066,7 @@ bool createEntities() {
 }
 
 // ============================================================
-// DESTROY MICRO-ROS ENTITIES
+// DESTROY MICRO-ROS ENTITIES   (rosTask)
 // ============================================================
 
 void destroyEntities() {
@@ -732,7 +1076,8 @@ void destroyEntities() {
 
   DBGLN("Destroying Micro-ROS entities...");
 
-  stopMotors();
+  requestStop();
+  vTaskDelay(pdMS_TO_TICKS(2 * CONTROL_PERIOD_MS));  // let controlTask act
 
   if (executor.context != NULL) {
     rclc_executor_fini(&executor);
@@ -748,6 +1093,7 @@ void destroyEntities() {
 
   rcl_subscription_fini(&cmd_vel_subscriber, &node);
   rcl_subscription_fini(&gains_subscriber, &node);
+  rcl_subscription_fini(&limits_subscriber, &node);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
 
@@ -760,7 +1106,7 @@ void destroyEntities() {
 }
 
 // ============================================================
-// CHECK AGENT
+// CHECK AGENT   (rosTask)
 // ============================================================
 
 bool agentAvailable() {
@@ -769,14 +1115,12 @@ bool agentAvailable() {
 }
 
 // ============================================================
-// PUBLISH ENCODERS
+// PUBLISH ENCODERS   (rosTask)
 // ============================================================
 
 void publishEncoders() {
-  noInterrupts();
-  long left_count = left_encoder_count;
-  long right_count = right_encoder_count;
-  interrupts();
+  long left_count, right_count;
+  readEncoders(&left_count, &right_count);
 
   encoder_msg.x = (double)left_count;
   encoder_msg.y = (double)right_count;
@@ -784,19 +1128,30 @@ void publishEncoders() {
 
   trackPublish(rcl_publish(&encoder_publisher, &encoder_msg, NULL));
 
-  pwm_msg.x = (double)applied_left_pwm;
-  pwm_msg.y = (double)applied_right_pwm;
+  // Snapshot the telemetry controlTask produced.
+  int    pwm_l, pwm_r;
+  double vel_l, vel_r;
+
+  portENTER_CRITICAL(&state_mux);
+  pwm_l = applied_left_pwm;
+  pwm_r = applied_right_pwm;
+  vel_l = measured_left_velocity;
+  vel_r = measured_right_velocity;
+  portEXIT_CRITICAL(&state_mux);
+
+  pwm_msg.x = (double)pwm_l;
+  pwm_msg.y = (double)pwm_r;
   pwm_msg.z = 0.0;
   rcl_publish(&pwm_publisher, &pwm_msg, NULL);
 
-  wheelvel_msg.x = measured_left_velocity;
-  wheelvel_msg.y = measured_right_velocity;
+  wheelvel_msg.x = vel_l;
+  wheelvel_msg.y = vel_r;
   wheelvel_msg.z = 0.0;
   rcl_publish(&wheelvel_publisher, &wheelvel_msg, NULL);
 }
 
 // ============================================================
-// PUBLISH ODOMETRY
+// PUBLISH ODOMETRY   (rosTask)
 // ============================================================
 
 void publishOdometry() {
@@ -808,10 +1163,8 @@ void publishOdometry() {
 
   last_odom_time = now;
 
-  noInterrupts();
-  long left_count = left_encoder_count;
-  long right_count = right_encoder_count;
-  interrupts();
+  long left_count, right_count;
+  readEncoders(&left_count, &right_count);
 
   long delta_left = left_count - previous_left_count;
   long delta_right = right_count - previous_right_count;
@@ -872,15 +1225,158 @@ void publishOdometry() {
 }
 
 // ============================================================
+// ROS TASK
+// ============================================================
+// The old loop() body, now a task of its own on core 0. Every vTaskDelay in
+// here is load bearing: without one the task WDT trips on core 0's idle task,
+// and nothing else pinned to core 0 (the WiFi/BT stack, if you ever add it)
+// would get a look in.
+
+void rosTask(void *arg) {
+  (void)arg;
+
+  unsigned long last_agent_check = 0;
+  unsigned long last_odom_publish = 0;
+  unsigned long disconnection_time = 0;
+  unsigned long last_time_sync = 0;
+
+  for (;;) {
+    if (agent_state != previous_state) {
+      previous_state = agent_state;
+    }
+
+    // ---------- WAIT FOR AGENT ----------
+    if (agent_state == WAITING_AGENT) {
+      requestStop();
+
+      if (millis() - last_agent_check >= AGENT_CHECK_PERIOD_MS) {
+        last_agent_check = millis();
+
+        if (agentAvailable()) {
+          DBGNL();
+          DBGLN("Micro-ROS Agent detected.");
+          agent_state = AGENT_AVAILABLE;
+        }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    // ---------- CREATE NEW SESSION ----------
+    if (agent_state == AGENT_AVAILABLE) {
+      DBGLN("Creating NEW Micro-ROS session...");
+
+      if (createEntities()) {
+        agent_state = AGENT_CONNECTED;
+        DBGLN("NEW Micro-ROS session CONNECTED.");
+      } else {
+        DBGLN("Entity creation failed. Retrying...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+
+      continue;
+    }
+
+    // ---------- CONNECTED ----------
+    if (agent_state == AGENT_CONNECTED) {
+      // Timeout MUST be 0. rcl_wait() documents 0 as a non-blocking poll, but
+      // any small non-zero value is not honoured through this rmw layer and
+      // falls through to a ~1 s block - measured at 995 ms for
+      // RCL_MS_TO_NS(5). On the old single-loop firmware that alone pinned the
+      // control loop to 1 Hz. It cannot do that any more now that the loop is
+      // its own task, but it would still throttle /enco/counts.
+      RCSOFTCHECK(rclc_executor_spin_some(&executor, 0));
+
+      // The command timeout is enforced inside controlStep() now, so the base
+      // keeps failing safe even while this task sits in a session call.
+
+      if (millis() - last_odom_publish >= ODOM_PERIOD_MS) {
+        last_odom_publish = millis();
+        publishEncoders();
+        publishOdometry();
+      }
+
+      if (publish_failures >= PUBLISH_FAILURE_LIMIT) {
+        agent_state = AGENT_DISCONNECTED;
+        disconnection_time = millis();
+        continue;
+      }
+
+      if (millis() - last_time_sync >= TIME_SYNC_PERIOD_MS) {
+        last_time_sync = millis();
+        rmw_uros_sync_session(100);
+      }
+
+      if (millis() - last_agent_check >= AGENT_CHECK_PERIOD_MS) {
+        last_agent_check = millis();
+
+        if (!agentAvailable()) {
+          agent_state = AGENT_DISCONNECTED;
+          disconnection_time = millis();
+        }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+
+    // ---------- AGENT DISCONNECTED - REBOOT FOR A CLEAN SESSION ----------
+    if (agent_state == AGENT_DISCONNECTED) {
+      DBGNL();
+      DBGLN("================================");
+      DBGLN("MICRO-ROS AGENT DISCONNECTED");
+      DBGLN("Rebooting...");
+      DBGLN("================================");
+
+      // Tearing the session down in place does not work: the client keeps
+      // pinging with the old session id (0x81) and a fresh agent only answers
+      // session-create requests (0x80), so it never reconnects. A reboot is
+      // the only way to guarantee a clean session, transport and UART.
+      //
+      // Suspend controlTask before killing the outputs, so the two tasks
+      // cannot both be writing motor pins across the restart.
+      requestStop();
+      vTaskDelay(pdMS_TO_TICKS(2 * CONTROL_PERIOD_MS));
+
+      if (control_task_handle != NULL) {
+        vTaskSuspend(control_task_handle);
+      }
+      forceMotorsOff();
+
+      vTaskDelay(pdMS_TO_TICKS(50));
+      ESP.restart();
+    }
+
+    // ---------- CLEANING UP - WAIT BEFORE RECONNECT ----------
+    if (agent_state == CLEANING_UP) {
+      requestStop();
+
+      if (millis() - disconnection_time >= RECONNECT_DELAY_MS) {
+        agent_state = WAITING_AGENT;
+        last_agent_check = millis();
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // Unknown state - should not happen, but never spin hot.
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// ============================================================
 // SETUP
 // ============================================================
 
 void setup() {
-  // Serial is opened by set_microros_transports() below - do not touch it here.
+  // Serial belongs to the micro-ROS transport, which opens it from
+  // nexva_transport_open() - do not touch it here.
   DBG_BEGIN();
   delay(1000);
 
-  // Motor setup
+  // ---- Motor pins ----
   pinMode(LEFT_IN1, OUTPUT);
   pinMode(LEFT_IN2, OUTPUT);
   pinMode(LEFT_ENA, OUTPUT);
@@ -893,9 +1389,10 @@ void setup() {
   analogWriteResolution(LEFT_ENA, PWM_RESOLUTION);
   analogWriteResolution(RIGHT_ENB, PWM_RESOLUTION);
 
-  stopMotors();
+  forceMotorsOff();
+  requestStop();
 
-  // Encoder setup
+  // ---- Encoder pins ----
   pinMode(LEFT_ENCODER_A, INPUT_PULLUP);
   pinMode(LEFT_ENCODER_B, INPUT_PULLUP);
   pinMode(RIGHT_ENCODER_A, INPUT_PULLUP);
@@ -917,129 +1414,42 @@ void setup() {
   delay(500);
 
   DBGLN("Micro-ROS transport initialized.");
-  DBGLN("Waiting for Micro-ROS Agent...");
 
   agent_state = WAITING_AGENT;
+
+  // ---- Start the tasks ----
+  // Control task first, so the motors are being actively held at 0 before the
+  // ROS side can ever set a target.
+  BaseType_t ok;
+
+  ok = xTaskCreatePinnedToCore(controlTask, "control", CONTROL_TASK_STACK, NULL,
+                               CONTROL_TASK_PRIORITY, &control_task_handle,
+                               CONTROL_TASK_CORE);
+  if (ok != pdPASS) {
+    DBGLN("Failed to create control task");
+    error_loop();
+  }
+
+  ok = xTaskCreatePinnedToCore(rosTask, "microros", ROS_TASK_STACK, NULL,
+                               ROS_TASK_PRIORITY, &ros_task_handle,
+                               ROS_TASK_CORE);
+  if (ok != pdPASS) {
+    DBGLN("Failed to create ROS task");
+    error_loop();
+  }
+
+  DBGLN("Tasks started. Waiting for Micro-ROS Agent...");
 }
 
 // ============================================================
 // LOOP
 // ============================================================
+// Arduino's own loopTask still exists (core 1, priority 1) and cannot be
+// removed from a sketch, so park it. Leaving it empty would have it spin at
+// full speed and starve anything else at priority 1 on core 1; a delay yields
+// the core to controlTask and the idle task instead. Do not put work here -
+// it has no timing guarantee and shares a core with the control loop.
 
 void loop() {
-  static unsigned long last_agent_check = 0;
-  static unsigned long last_odom_publish = 0;
-  static unsigned long disconnection_time = 0;
-  static unsigned long last_time_sync = 0;
-
-  // Track state changes
-  if (agent_state != previous_state) {
-    previous_state = agent_state;
-  }
-
-  // WAIT FOR AGENT
-  if (agent_state == WAITING_AGENT) {
-    if (millis() - last_agent_check >= AGENT_CHECK_PERIOD_MS) {
-      last_agent_check = millis();
-
-      if (agentAvailable()) {
-        DBGNL();
-        DBGLN("Micro-ROS Agent detected.");
-        agent_state = AGENT_AVAILABLE;
-      }
-    }
-
-    stopMotors();
-    delay(10);
-    return;
-  }
-
-  // CREATE NEW SESSION
-  if (agent_state == AGENT_AVAILABLE) {
-    DBGLN("Creating NEW Micro-ROS session...");
-
-    if (createEntities()) {
-      agent_state = AGENT_CONNECTED;
-      DBGLN("NEW Micro-ROS session CONNECTED.");
-    } else {
-      DBGLN("Entity creation failed. Retrying...");
-      delay(1000);
-    }
-
-    return;
-  }
-
-  // CONNECTED
-  if (agent_state == AGENT_CONNECTED) {
-    // Timeout MUST be 0. rcl_wait() documents 0 as a non-blocking poll, but
-    // any small non-zero value is not honoured through this rmw layer and
-    // falls through to a ~1 s block - measured at 995 ms for RCL_MS_TO_NS(5).
-    // That alone pinned the whole loop, and therefore /enco/counts, to 1 Hz.
-    RCSOFTCHECK(rclc_executor_spin_some(&executor, 0));
-
-    if (millis() - last_cmd_time > CMD_TIMEOUT_MS) {
-      stopMotors();
-    } else {
-      // Self-gated to CONTROL_HZ; the surrounding loop runs far faster.
-      controlLoop();
-    }
-
-    if (millis() - last_odom_publish >= ODOM_PERIOD_MS) {
-      last_odom_publish = millis();
-      publishEncoders();
-      publishOdometry();
-    }
-
-    if (publish_failures >= PUBLISH_FAILURE_LIMIT) {
-      agent_state = AGENT_DISCONNECTED;
-      disconnection_time = millis();
-      return;
-    }
-
-    if (millis() - last_time_sync >= TIME_SYNC_PERIOD_MS) {
-      last_time_sync = millis();
-      rmw_uros_sync_session(100);
-    }
-
-    if (millis() - last_agent_check >= AGENT_CHECK_PERIOD_MS) {
-      last_agent_check = millis();
-
-      if (!agentAvailable()) {
-        agent_state = AGENT_DISCONNECTED;
-        disconnection_time = millis();
-      }
-    }
-
-    delay(2);
-    return;
-  }
-
-  // AGENT DISCONNECTED - REBOOT FOR A CLEAN SESSION
-  if (agent_state == AGENT_DISCONNECTED) {
-    DBGNL();
-    DBGLN("================================");
-    DBGLN("MICRO-ROS AGENT DISCONNECTED");
-    DBGLN("Rebooting...");
-    DBGLN("================================");
-
-    // Tearing the session down in place does not work: the client keeps
-    // pinging with the old session id (0x81) and a fresh agent only answers
-    // session-create requests (0x80), so it never reconnects. A reboot is the
-    // only way to guarantee a clean session, transport and UART.
-    stopMotors();
-    delay(50);
-    ESP.restart();
-  }
-
-  // CLEANING UP - WAIT BEFORE RECONNECT
-  if (agent_state == CLEANING_UP) {
-    if (millis() - disconnection_time >= RECONNECT_DELAY_MS) {
-      agent_state = WAITING_AGENT;
-      last_agent_check = millis();
-    }
-
-    stopMotors();
-    delay(100);
-    return;
-  }
+  vTaskDelay(pdMS_TO_TICKS(1000));
 }

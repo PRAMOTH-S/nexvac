@@ -1,0 +1,18 @@
+# Cleaning zones for the Nexva robot.
+#
+# A zone is a polygon in MAP coordinates (metres). A rectangle is just a
+# 4-point polygon, which is what the web UI sends when you drag a box.
+#
+# Zones are bound to a map: x/y mean a different place on a different map.
+# Re-record them if you re-map.
+map: sep23map2
+
+zones:
+  # Replace these with real corners. Read them off RViz with Publish Point,
+  # or drag a rectangle on the web UI, which writes this file for you.
+  - name: Main Floor
+    points:
+      - [-2.0, -3.0]
+      - [ 5.0, -3.0]
+      - [ 5.0,  2.0]
+      - [-2.0,  2.0]
