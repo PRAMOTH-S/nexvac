@@ -25,7 +25,7 @@ from geometry_msgs.msg import (
     Point32, PolygonStamped, PoseStamped, PoseWithCovarianceStamped, Twist,
     Vector3,
 )
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import (
     Bool as BoolMsg, Float32 as Float32Msg, String as StringMsg,
 )
@@ -39,7 +39,7 @@ from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.qos import (
     QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
-    QoSReliabilityPolicy,
+    QoSReliabilityPolicy, qos_profile_sensor_data,
 )
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
@@ -154,6 +154,18 @@ CMD_FRESH_S = 0.6
 # The collision monitor publishes only when its action CHANGES, so the last
 # message is the current state. Names are CollisionMonitorState's constants.
 GUARD_ACTIONS = {0: '', 1: 'stop', 2: 'slowdown', 3: 'approach', 4: 'limit'}
+
+# Per-wheel speed, from the raw encoder counts on /enco/counts (one message
+# carries both wheels). Must match nexva_frimware/wheel_odometry.py and the
+# firmware's ENCODER_CPR. /joint_states also carries wheel velocities, but it
+# differentiates on its own timer against counts that arrive on another, so
+# it alternates between 0 and double; differencing over a window does not.
+ENCODER_CPR = 662.0
+WHEEL_RADIUS = 0.0335
+WHEEL_BASE = 0.245
+WHEEL_WINDOW_S = 0.3
+# A jump larger than this in one sample is the ESP32 restarting its counters.
+WHEEL_RESET_M = 1.0
 
 
 def yaw_from_quat(z, w):
@@ -455,6 +467,15 @@ class NavClient(Node):
                                  callback_group=cb)
         self.create_subscription(Twist, '/cmd_vel', self._cmd_cb, newest,
                                  callback_group=cb)
+        self._wheel_samples = collections.deque()   # (monotonic, left_m, right_m)
+        self._wheels = None              # (left m/s, right m/s, monotonic)
+        self.create_subscription(Vector3, '/enco/counts', self._counts_cb,
+                                 qos_profile_sensor_data, callback_group=cb)
+        # Fallback only: used when no counts have arrived (a different
+        # firmware, or the counts topic renamed). Noisier, see WHEEL_* above.
+        self._joint_wheels = None        # (left m/s, right m/s, monotonic)
+        self.create_subscription(JointState, '/joint_states', self._joints_cb,
+                                 qos_profile_sensor_data, callback_group=cb)
         self.create_subscription(
             CollisionMonitorState, '/collision_monitor_state', self._guard_cb,
             10, callback_group=cb)
@@ -488,6 +509,31 @@ class NavClient(Node):
         t = msg.twist.twist
         self._odom = (t.linear.x, t.angular.z, time.monotonic())
 
+    def _counts_cb(self, msg):
+        now = time.monotonic()
+        metres = 2.0 * math.pi * WHEEL_RADIUS / ENCODER_CPR
+        left, right = msg.x * metres, msg.y * metres
+        s = self._wheel_samples
+        if s and (abs(left - s[-1][1]) > WHEEL_RESET_M
+                  or abs(right - s[-1][2]) > WHEEL_RESET_M):
+            s.clear()                    # counters restarted: start over
+        s.append((now, left, right))
+        while len(s) > 2 and now - s[1][0] >= WHEEL_WINDOW_S:
+            s.popleft()
+        t0, l0, r0 = s[0]
+        if now - t0 > 1e-3:
+            self._wheels = ((left - l0) / (now - t0),
+                            (right - r0) / (now - t0), now)
+
+    def _joints_cb(self, msg):
+        try:
+            v = dict(zip(msg.name, msg.velocity))
+            left, right = v['left_wheel_joint'], v['right_wheel_joint']
+        except (KeyError, TypeError):
+            return
+        self._joint_wheels = (left * WHEEL_RADIUS, right * WHEEL_RADIUS,
+                              time.monotonic())
+
     def _cmd_cb(self, msg):
         self._cmd = (msg.linear.x, msg.angular.z, time.monotonic())
 
@@ -500,7 +546,21 @@ class NavClient(Node):
         odom, cmd = self._odom, self._cmd
         fresh = odom is not None and now - odom[2] <= ODOM_FRESH_S
         cmd_live = cmd is not None and now - cmd[2] <= CMD_FRESH_S
+        wheels, source = self._wheels, 'encoders'
+        if wheels is None or now - wheels[2] > ODOM_FRESH_S:
+            wheels, source = self._joint_wheels, 'joint_states'
+        wheels_fresh = wheels is not None and now - wheels[2] <= ODOM_FRESH_S
+        cmd_v = float(cmd[0]) if cmd_live else 0.0
+        cmd_w = float(cmd[1]) if cmd_live else 0.0
         return {
+            # Measured wheel surface speed, m/s, + = forward. None = no counts.
+            'left': float(wheels[0]) if wheels_fresh else None,
+            'right': float(wheels[1]) if wheels_fresh else None,
+            'wheels_source': source if wheels_fresh else None,
+            # What each wheel was asked for: the firmware's own split of
+            # /cmd_vel (before its speed cap), so the two can be compared.
+            'cmd_left': cmd_v - cmd_w * WHEEL_BASE / 2.0,
+            'cmd_right': cmd_v + cmd_w * WHEEL_BASE / 2.0,
             'fresh': fresh,
             'v': float(odom[0]) if fresh else None,
             'w': float(odom[1]) if fresh else None,

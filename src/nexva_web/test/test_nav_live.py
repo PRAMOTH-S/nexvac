@@ -600,6 +600,35 @@ def test_speed_card_reports_measured_commanded_and_obstacle_guard():
         assert snap['cmd_v'] == pytest.approx(0.25)
         assert snap['guard'] == 'approach'
         assert snap['max_v'] > 0
+        # commanded split: 0.25 m/s straight -> both wheels 0.25
+        assert snap['cmd_left'] == pytest.approx(0.25)
+        assert snap['cmd_right'] == pytest.approx(0.25)
+
+        # per-wheel speed from raw encoder counts: left 0.20 m/s, right
+        # 0.10 m/s in reverse (a turn: the right wheel is going backwards)
+        from geometry_msgs.msg import Vector3
+        counts_pub = r.helper.create_publisher(Vector3, '/enco/counts', 10)
+        try:
+            per_m = 662.0 / (2 * math.pi * 0.0335)
+            t0 = time.monotonic()
+
+            def wheels_ok():
+                dt = time.monotonic() - t0
+                counts_pub.publish(Vector3(x=0.20 * dt * per_m,
+                                           y=-0.10 * dt * per_m))
+                time.sleep(0.05)
+                s = node.speed_snapshot()
+                return (s['left'] is not None and dt > 0.6
+                        and abs(s['left'] - 0.20) < 0.02
+                        and abs(s['right'] + 0.10) < 0.02)
+            assert wait_until(wheels_ok, 5.0), node.speed_snapshot()
+            # ESP32 reboot: counters restart at zero - no huge spike
+            counts_pub.publish(Vector3(x=0.0, y=0.0))
+            time.sleep(0.1)
+            s = node.speed_snapshot()
+            assert s['left'] is None or abs(s['left']) < 1.0
+        finally:
+            r.helper.destroy_publisher(counts_pub)
 
         # the timer pushes it to the page as a 'speed' event
         assert wait_until(
@@ -620,6 +649,34 @@ def test_speed_card_reports_measured_commanded_and_obstacle_guard():
         r.helper.destroy_publisher(cmd_pub)
         if guard_pub is not None:
             r.helper.destroy_publisher(guard_pub)
+
+
+
+def test_wheel_speed_falls_back_to_joint_states_without_counts():
+    from sensor_msgs.msg import JointState
+    r = rig()
+    node = r.node
+    # counts from an earlier test must have gone stale first
+    assert wait_until(lambda: node._wheels is None
+                      or time.monotonic() - node._wheels[2] > 1.0, 3.0)
+    pub = r.helper.create_publisher(JointState, '/joint_states', 10)
+    try:
+        msg = JointState()
+        msg.name = ['left_wheel_joint', 'right_wheel_joint']
+        msg.velocity = [0.15 / 0.0335, -0.05 / 0.0335]       # rad/s
+
+        def ok():
+            pub.publish(msg)
+            s = node.speed_snapshot()
+            return s['wheels_source'] == 'joint_states'
+        assert wait_until(ok, 5.0), node.speed_snapshot()
+        s = node.speed_snapshot()
+        assert s['left'] == pytest.approx(0.15)
+        assert s['right'] == pytest.approx(-0.05)
+        # a JointState without the wheel joints is ignored, not a crash
+        pub.publish(JointState(name=['other'], velocity=[1.0]))
+    finally:
+        r.helper.destroy_publisher(pub)
 
 
 if __name__ == '__main__':

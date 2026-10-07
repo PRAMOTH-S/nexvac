@@ -369,6 +369,30 @@
     border: 1px solid var(--line); }
   .speed .big { font-size: 32px; letter-spacing: -.02em; }
   .speedbar { height: 12px; }
+  /* Per-wheel: centre is stopped, fill grows right for forward, left for
+     reverse; the thin marker is what that wheel was commanded. */
+  .wheels { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr;
+    gap: 10px 16px; margin-top: 10px; padding-top: 10px;
+    border-top: 1px dashed var(--line); }
+  .wheel .head { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .wheel .head b { font-size: 16px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .wbar { position: relative; height: 10px; border-radius: 999px;
+    background: var(--sunken); border: 1px solid var(--line); overflow: hidden; }
+  .wbar::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0;
+    width: 1px; background: var(--muted); opacity: .5; }
+  .wbar i { position: absolute; top: 0; bottom: 0; left: 50%; width: 0;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: left .2s linear, width .2s linear; }
+  .wbar i.rev { background: var(--warn); }
+  .wbar b { position: absolute; top: -2px; bottom: -2px; width: 2px; left: 50%;
+    background: var(--ink); transition: left .2s linear; }
+  .wheel .cmd { font-size: 11.5px; color: var(--muted); margin-top: 3px;
+    font-variant-numeric: tabular-nums; }
+  .wheel .cmd.off { color: var(--warn); }
+  .speed.stale .wheels { opacity: .45; }
+  .wsrc { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); }
+  .wsrc.warn { color: var(--warn); }
 
   /* waypoint tiles */
   .wp { background: var(--panel-2); border-radius: 12px; padding: 10px 12px; }
@@ -410,6 +434,40 @@
       gap: 16px; align-items: start; }
     .col > .card:last-child { margin-bottom: 0; }
   }
+  /* mission button icons */
+  .ic { width: 18px; height: 18px; fill: currentColor; flex: none; }
+  #m-explore, #m-clean, #m-navigate, #m-manual, #m-save, #m-stop {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+
+  /* header connection badge */
+  .linkchip { display: inline-flex; align-items: center; gap: 8px; flex: none;
+    font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow);
+    color: var(--muted); }
+  .linkchip i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .linkchip.up { color: var(--ok); }
+  .linkchip.up i { background: var(--ok); animation: pulse 2s ease-out infinite; }
+  .linkchip.down { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+  .linkchip.down i { background: var(--bad); }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
+    100% { box-shadow: 0 0 0 9px transparent; } }
+
+  /* pop-up notifications: errors and results surface where you are looking,
+     not only in the log at the bottom of the page */
+  .toasts { position: fixed; z-index: 60; top: 76px; right: 14px; display: flex;
+    flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 28px)); pointer-events: none; }
+  .toast { pointer-events: auto; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 12px;
+    padding: 10px 14px; font-size: 13.5px; box-shadow: 0 10px 30px rgba(0,0,0,.18);
+    animation: tin .2s ease-out; cursor: pointer; }
+  .toast.err { border-left-color: var(--bad); }
+  .toast.good { border-left-color: var(--ok); }
+  .toast.out { opacity: 0; transform: translateY(-6px); transition: opacity .25s, transform .25s; }
+  @keyframes tin { from { opacity: 0; transform: translateY(-8px); } }
+  @media (max-width: 600px) { .toasts { left: 14px; right: 14px; width: auto; }
+    .linkchip span { display: none; } .linkchip { padding: 9px; } }
+
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
   }
@@ -441,7 +499,9 @@
         <div class="sub" id="sub">connecting…</div>
       </div>
     </div>
+    <span class="linkchip" id="hdr-link" aria-live="polite"><i></i><span>connecting…</span></span>
   </header>
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
 
   <div id="linkbanner" class="banner bad" hidden>
     Link lost — the robot is still autonomous (an explore/clean mission is
@@ -479,6 +539,19 @@
           <span class="pill" id="sp-guard" hidden><i class="dot warn"></i><span id="sp-guard-t"></span></span>
         </div>
       </div>
+      <div class="wheels" title="Measured from the wheel encoders; the dark marker is what each wheel was commanded">
+        <div class="wheel">
+          <div class="head"><span>Left wheel</span><span><b id="wl-v">–</b> m/s</span></div>
+          <div class="wbar"><i id="wl-bar"></i><b id="wl-cmd"></b></div>
+          <div class="cmd" id="wl-c">cmd –</div>
+        </div>
+        <div class="wheel">
+          <div class="head"><span>Right wheel</span><span><b id="wr-v">–</b> m/s</span></div>
+          <div class="wbar"><i id="wr-bar"></i><b id="wr-cmd"></b></div>
+          <div class="cmd" id="wr-c">cmd –</div>
+        </div>
+        <div class="wsrc" id="wh-src">waiting for wheel encoders…</div>
+      </div>
     </div>
   </div>
 
@@ -496,12 +569,12 @@
     </div>
     <div class="sub" id="mode-err" style="color:var(--bad);margin-bottom:8px" hidden></div>
     <div class="row">
-      <button id="m-explore" class="primary">EXPLORE</button>
-      <button id="m-clean" class="primary">CLEAN</button>
-      <button id="m-navigate">NAVIGATE</button>
-      <button id="m-manual">MANUAL</button>
-      <button id="m-save" title="Save the live map and the robot's pose now">SAVE MAP</button>
-      <button id="m-stop" class="danger">STOP MISSION</button>
+      <button id="m-explore" class="primary"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm4.2 5.8-2.6 5.8-5.8 2.6 2.6-5.8 5.8-2.6zM12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/></svg>EXPLORE</button>
+      <button id="m-clean" class="primary"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l1.8 4.7L18.5 8l-4.7 1.8L12 14.5l-1.8-4.7L5.5 8l4.7-1.3L12 2zm6 11l.9 2.1 2.1.9-2.1.9L18 19l-.9-2.1-2.1-.9 2.1-.9L18 13zM6 15l.7 1.6 1.6.7-1.6.7L6 19.6l-.7-1.6-1.6-.7 1.6-.7L6 15z"/></svg>CLEAN</button>
+      <button id="m-navigate"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>NAVIGATE</button>
+      <button id="m-manual"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 7v4H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2h-5v-4h-2z"/></svg>MANUAL</button>
+      <button id="m-save" title="Save the live map and the robot's pose now"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2 2v5h8V5H7zm5 9a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/></svg>SAVE MAP</button>
+      <button id="m-stop" class="danger"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>STOP MISSION</button>
     </div>
     <div id="explorer-row" hidden>
       <div class="row" style="margin-top:10px">
@@ -797,7 +870,29 @@ let ws, waypoints = [], state = {}, tour = [], reconnectDelay = 500;
 let robotMode = {}, explorerMode = null, explorerStatus = {}, savedMaps = [];
 let linkUp = false;
 
+// Errors and successes also pop up; routine lines stay in the log only.
+// 'connected' is skipped: the header badge already shows the link.
+const toastSeen = new Map();
+function toast(msg, cls) {
+  // The same message again within 4 s is a repeat (a joystick drag while
+  // disconnected logs "not connected" many times a second), not news.
+  const now = Date.now();
+  if (now - (toastSeen.get(msg) || 0) < 4000) return;
+  toastSeen.set(msg, now);
+  if (toastSeen.size > 50) toastSeen.clear();
+  const box = $('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (cls || '');
+  el.textContent = msg;
+  const drop = () => { el.classList.add('out'); setTimeout(() => el.remove(), 260); };
+  el.onclick = drop;
+  box.prepend(el);
+  while (box.childElementCount > 4) box.lastChild.remove();
+  setTimeout(drop, cls === 'err' ? 7000 : 3500);
+}
+
 function log(msg, cls) {
+  if ((cls === 'err' || cls === 'good') && msg !== 'connected') toast(msg, cls);
   const d = document.createElement('div');
   if (cls) d.className = cls;
   d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
@@ -808,7 +903,7 @@ function log(msg, cls) {
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => {
-    reconnectDelay = 500; setLink(true); log('connected', 'good');
+    reconnectDelay = 500; linkSince = Date.now(); setLink(true); log('connected', 'good');
     loadMaps();   // read-only; no mission command is ever sent on connect
     // The bridge seeds every new connection with its whole log ring, and the
     // sequence numbers restart with the bridge process. Dropping what we had
@@ -834,9 +929,11 @@ function setLink(up) {
   linkUp = up;
   $('d-link').className = 'dot ' + (up ? 'ok' : 'bad');
   $('t-link').textContent = up ? 'connected' : 'disconnected';
+  $('hdr-link').className = 'linkchip ' + (up ? 'up' : 'down');
+  $('hdr-link').lastChild.textContent = up ? 'robot connected' : 'disconnected';
   if (!up) {
     $('d-nav').className = 'dot'; $('t-nav').textContent = 'unknown';
-    paintSpeed({fresh: false, cmd_v: 0, max_v: 0, guard: ''});
+    paintSpeed({fresh: false, cmd_v: 0, max_v: 0, guard: '', left: null, right: null, cmd_left: 0, cmd_right: 0});
   }
   renderLinkBanner();
 }
@@ -861,6 +958,38 @@ function paintDockMode() {
   el.textContent = `mode: ${mode}${robotMode.map ? ' · ' + robotMode.map : ''}` +
                    (explorerMode ? ` · ${explorerMode}` : '');
 }
+// One wheel: measured fill from the centre, commanded marker, and a warning
+// colour on the command line when the wheel is well off what it was asked
+// (a stalled, slipping or mis-wired wheel shows up here first).
+function paintWheel(id, v, cmd, max) {
+  const half = x => Math.max(-50, Math.min(50, x / max * 50));
+  const bar = $(id + '-bar');
+  const has = typeof v === 'number';
+  const h = has ? half(v) : 0;
+  bar.style.left = (h >= 0 ? 50 : 50 + h) + '%';
+  bar.style.width = Math.abs(h) + '%';
+  bar.classList.toggle('rev', has && v < -0.005);
+  $(id + '-v').textContent = has ? v.toFixed(2) : '–';
+  const c = typeof cmd === 'number' ? cmd : 0;
+  $(id + '-cmd').style.left = `calc(${50 + half(c)}% - 1px)`;
+  const line = $(id + '-c');
+  line.textContent = `cmd ${c.toFixed(2)} m/s`;
+  line.classList.toggle('off', has && Math.abs(c) > 0.03 && Math.abs(v - c) > 0.06);
+}
+
+// A bridge from before the speed feed never sends 'speed' at all, so the
+// panel would sit on "waiting" forever. Name the actual cause instead.
+let lastSpeedAt = 0, linkSince = 0;
+setInterval(() => {
+  if (!linkUp || Date.now() - linkSince < 4000 || Date.now() - lastSpeedAt < 4000) return;
+  $('sp-meta').textContent = 'no speed data from the web bridge';
+  const src = $('wh-src');
+  src.className = 'wsrc warn';
+  src.textContent = lastSpeedAt
+    ? 'speed data stopped arriving — is ./web.sh still running?'
+    : 'the web bridge on the robot is an older build: push, run ./build.sh nexva_web on the Pi, restart ./web.sh';
+}, 1000);
+
 function paintSpeed(m) {
   const box = $('speed'), max = m.max_v > 0 ? m.max_v : 0.3;
   const pct = v => Math.min(100, Math.abs(v) / max * 100);
@@ -878,6 +1007,23 @@ function paintSpeed(m) {
     $('sp-meta').textContent = 'no odometry — is bringup running?';
   }
   $('sp-cmd').style.left = `calc(${pct(m.cmd_v)}% - 1px)`;
+  paintWheel('wl', m.left, m.cmd_left, max);
+  paintWheel('wr', m.right, m.cmd_right, max);
+  // Say where the wheel numbers come from - or exactly what is missing -
+  // rather than leaving two dashes that look like a page bug.
+  const src = $('wh-src');
+  if (m.wheels_source === 'encoders') {
+    src.className = 'wsrc'; src.textContent = 'from wheel encoders (/enco/counts)';
+  } else if (m.wheels_source === 'joint_states') {
+    src.className = 'wsrc warn';
+    src.textContent = 'from /joint_states (no /enco/counts reaching the web bridge) — readings may jump';
+  } else if (m.wheels_source === undefined) {
+    src.className = 'wsrc warn';
+    src.textContent = 'this web bridge is an older build — run ./build.sh nexva_web on the Pi and restart ./web.sh';
+  } else {
+    src.className = 'wsrc warn';
+    src.textContent = linkUp ? 'no wheel data — is bringup (ESP32 + micro-ROS agent) running?' : 'not connected';
+  }
   $('dk-v').textContent = m.fresh ? Math.abs(m.v).toFixed(2) : '–';
   const g = m.guard || '';
   const note = g ? (GUARD_TEXT[g] || g) : '';
@@ -955,6 +1101,7 @@ function handle(m) {
       liveMapSeq = m.seq;
       break;
     case 'speed':
+      lastSpeedAt = Date.now();
       paintSpeed(m);
       break;
     case 'pose':
