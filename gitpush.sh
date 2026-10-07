@@ -6,7 +6,7 @@
 #   ./gitpush.sh --dry                show what would be committed, push nothing
 #
 # This is NOT push.sh. push.sh sends source to the Pi; this sends it to
-# https://github.com/PRAMOTH-S/nexva_ws (private). Override with
+# https://github.com/PRAMOTH-S/nexvac (public). Override with
 #   GIT_REMOTE_URL=https://github.com/PRAMOTH-S/other.git ./gitpush.sh
 #
 # Auth comes from the GitHub CLI (`gh auth login`), so no token lives in this
