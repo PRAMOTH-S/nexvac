@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Commit everything in this workspace and push it to GitHub in one go.
 #
-#   ./gitpush.sh                      list changes, ask what you changed, commit, push
-#   ./gitpush.sh "fixed PID gains"    commit with this message (no question), push
-#   ./gitpush.sh --dry                show what would be committed, push nothing
+#   ./gitpush.sh          list changes, ask what you changed, commit, push
+#   ./gitpush.sh --dry    show what would be committed, push nothing
+#
+# The commit message is always asked for, and an empty answer is not accepted.
 #
 # This is NOT push.sh. push.sh sends source to the Pi; this sends it to
 # https://github.com/PRAMOTH-S/nexvac (public). Override with
@@ -22,12 +23,11 @@ BRANCH="${GIT_BRANCH:-main}"
 cd "$(dirname "$(readlink -f "$0")")"
 
 DRY=0
-MSG=""
 for arg in "$@"; do
     case "$arg" in
         --dry) DRY=1 ;;
         -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
-        *) MSG="$arg" ;;
+        *) echo "Unknown option: $arg (the commit message is asked for, not passed)" >&2; exit 1 ;;
     esac
 done
 
@@ -61,11 +61,17 @@ else
         echo "(--dry: nothing committed or pushed)"
         exit 0
     fi
-    if [ -z "$MSG" ] && [ -t 0 ]; then
-        echo
-        read -r -p "What did you change today? (Enter = automatic message) " MSG
+    if [ ! -t 0 ]; then
+        git reset -q
+        echo "Run this in a terminal: it needs to ask you for the commit message." >&2
+        exit 1
     fi
-    git commit -q -m "${MSG:-Update $(date '+%Y-%m-%d %H:%M') from $(hostname)}"
+    MSG=""
+    echo
+    while [ -z "${MSG//[[:space:]]/}" ]; do
+        read -r -p "What did you change today? " MSG
+    done
+    git commit -q -m "$MSG"
 fi
 [ "$DRY" = 1 ] && exit 0
 
